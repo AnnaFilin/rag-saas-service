@@ -25,12 +25,21 @@ def health_check():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    records = store.get_workspace(request.workspace_id)
+    stored_records = len(records)
+    candidates = [
+        {"content": rec["content"], "source": rec.get("source")}
+        for rec in records[:3]
+    ]
+
     return {
         "workspace_id": request.workspace_id,
         "question": request.question,
         "role": request.role,
         "answer": "This is a stub answer.",
         "sources": [],
+        "stored_records": stored_records,
+        "candidates": candidates,
     }
 
 
