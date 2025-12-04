@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from src.process_texts import split_into_chunks
-
+from src.embeddings import create_embeddings
+from src.memory_store import store
 
 app = FastAPI()
 
@@ -42,11 +43,16 @@ def ingest(request: IngestRequest):
         chunks = split_into_chunks(text=document, source=request.workspace_id)
         all_chunks.extend(chunks)
 
+    embeddings, _ = create_embeddings(all_chunks) 
+    store.add(request.workspace_id, all_chunks, embeddings)
+    stored_records = len(store.get_workspace(request.workspace_id))
 
     return {
         "workspace_id": request.workspace_id,
         "ingested_count": len(request.documents),
         "chunks_count": len(all_chunks),
+        "embeddings_count": len(embeddings),
+        "stored_records": stored_records,
         "skipped": 0,
         "errors": [],
     }
