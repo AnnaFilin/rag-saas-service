@@ -23,6 +23,13 @@ class InMemoryStore:
         """Return all stored chunk records for the workspace."""
         return list(self._data.get(workspace_id, []))
 
+    def list_workspaces(self) -> list[dict]:
+        """Return a summary of workspace IDs and their stored record counts."""
+        return [
+            {"workspace_id": workspace_id, "records": len(records)}
+            for workspace_id, records in self._data.items()
+        ]
+
     def top_k_similar(
         self,
         workspace_id: str,

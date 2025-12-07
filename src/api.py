@@ -36,7 +36,17 @@ class ChatResponse(BaseModel):
     llm_backend: str
     llm_model: str
 
+class WorkspaceSummary(BaseModel):
+    workspace_id: str
+    records: int
 
+
+@app.get("/workspaces")
+def list_workspaces() -> list[WorkspaceSummary]:
+    return [
+        WorkspaceSummary(**workspace)
+        for workspace in store.list_workspaces()
+    ]
 
 @app.get("/health")
 def health_check():
