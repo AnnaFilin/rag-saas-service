@@ -23,5 +23,39 @@ class InMemoryStore:
         """Return all stored chunk records for the workspace."""
         return list(self._data.get(workspace_id, []))
 
+    def top_k_similar(
+        self,
+        workspace_id: str,
+        query_embedding: list[float],
+        k: int = 3,
+    ) -> list[dict]:
+        """Return up to k stored records closest to the query vector."""
+        records = self.get_workspace(workspace_id)
+        if not records:
+            return []
+
+        query_vector = np.array(query_embedding, dtype=float)
+        query_norm = np.linalg.norm(query_vector)
+        if query_norm == 0:
+            return []
+
+        scored = []
+        for record in records:
+            vector = np.array(record["embedding"], dtype=float)
+            denom = query_norm * np.linalg.norm(vector)
+            if denom == 0:
+                continue
+            score = float(np.dot(query_vector, vector) / denom)
+            scored.append(
+                {
+                    "content": record["content"],
+                    "source": record.get("source"),
+                    "score": score,
+                }
+            )
+
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[:k]
+
 
 store = InMemoryStore()

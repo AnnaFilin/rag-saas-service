@@ -3,29 +3,49 @@
 # Local LLM (Ollama) + retrieval helpers. No hidden state.
 # We expose a factory that builds a fresh chain in the caller's process.
 
+import os
+
 from langchain_ollama import OllamaLLM
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
 
-def build_llm_chain(model_name: str = "llama3.2:latest", temperature: float = 0.1):
+def build_llm_chain(
+    role_prompt: str,
+    model_name: str = "llama3.2:latest",
+    temperature: float = 0.1,
+):
     """
     Factory: build and return a ready-to-use LangChain 'chain' (Prompt -> LLM).
     Must be called in the same process where .invoke() will run.
     """
-    print(f"🔧 Initializing LLM model: {model_name}")
-    llm = OllamaLLM(model=model_name, temperature=temperature)
+    backend = os.getenv("LLM_BACKEND", "ollama").lower()
+    if backend != "ollama":
+     configured_model = os.getenv("LLM_MODEL", model_name)
+    configured_temperature = float(os.getenv("LLM_TEMPERATURE", temperature))
+    print(
+        f"🔧 Initializing LLM backend={backend} model={configured_model} "
+        f"temperature={configured_temperature}"
+    )
+
+    if backend == "ollama":
+        llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
+    elif backend == "openai":
+        llm = ChatOpenAI(model=configured_model, temperature=configured_temperature)
+    else:
+        raise RuntimeError('Unsupported LLM_BACKEND; only "ollama" and "openai" are implemented.')
 
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=(
-            # "You are a Python programming expert. Based on the provided documentation, "
-            # "answer the question clearly and accurately.\n\n"
-            # "Documentation:\n{context}\n\n"
-            # "Question: {question}\n\n"
-            # "Answer (be specific about syntax, keywords, and provide examples when helpful):"
-            "You are an ethnobotany researcher. Based on the provided texts, identify and describe plants traditionally used for visionary, lucid-dreaming, or trance-inducing purposes."
-
-
+            role_prompt
+            + "\n\n"
+            "Context:\n{context}\n\n"
+            "Question: {question}\n\n"
+            "Instructions:\n"
+            "- Use ONLY the provided context when answering.\n"
+            "- If the context does not contain the answer, respond with:\n"
+            "  \"I do not know based on the provided context.\"\n"
         ),
     )
 
@@ -93,7 +113,9 @@ if __name__ == "__main__":
     client = chromadb.PersistentClient(path="./data/index/chroma_db")
     collection = client.get_or_create_collection(name="python_guide")
 
-    chain = build_llm_chain()
+    chain = build_llm_chain(
+        "You are a helpful assistant for a small software project. Answer only based on context."
+    )
     question = "What is a function in Python?"
     ctx = "A function is a block of code that performs a specific task when called."
     print("🚀 Testing direct LLM invocation...")

@@ -3,6 +3,16 @@ from pydantic import BaseModel
 from src.process_texts import split_into_chunks
 from src.embeddings import create_embeddings
 from src.memory_store import store
+from src.llm_pipeline import build_llm_chain, get_llm_answer
+import os
+
+LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
+
+DEFAULT_ROLE = (
+    "You are a helpful assistant that answers only based on the provided context. "
+    "If the context is not enough, say: 'I do not know based on the provided context.'"
+)
+
 
 app = FastAPI()
 
@@ -14,6 +24,17 @@ class ChatRequest(BaseModel):
 class IngestRequest(BaseModel):
     workspace_id: str
     documents: list[str]
+
+class ChatResponse(BaseModel):
+    workspace_id: str
+    question: str
+    role: str | None = None
+    answer: str
+    sources: list[dict]
+    stored_records: int
+    candidates: list[dict]
+    llm_backend: str
+    llm_model: str
 
 
 
@@ -27,20 +48,55 @@ def health_check():
 def chat(request: ChatRequest):
     records = store.get_workspace(request.workspace_id)
     stored_records = len(records)
-    candidates = [
-        {"content": rec["content"], "source": rec.get("source")}
-        for rec in records[:3]
-    ]
+    llm_backend = os.getenv("LLM_BACKEND", "ollama")
+    llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
 
-    return {
-        "workspace_id": request.workspace_id,
-        "question": request.question,
-        "role": request.role,
-        "answer": "This is a stub answer.",
-        "sources": [],
-        "stored_records": stored_records,
-        "candidates": candidates,
-    }
+    if stored_records == 0:
+        answer = "This is a stub answer."
+        candidates = []
+    else:
+        query_chunks = [{"content": request.question}]
+        query_embeddings, _ = create_embeddings(query_chunks)
+        query_vector = query_embeddings[0].tolist()
+        candidates = store.top_k_similar(
+            workspace_id=request.workspace_id,
+            query_embedding=query_vector,
+            k=3,
+        )
+        context_parts = [c["content"] for c in candidates if "content" in c]
+        context = "\n\n---\n\n".join(context_parts)
+
+        if not LLM_ENABLED:
+            answer = "LLM is temporarily disabled. Please try again later."
+        else:
+            effective_role = (
+                request.role.strip()
+                if request.role and request.role.strip()
+                else DEFAULT_ROLE
+            )
+            chain = build_llm_chain(effective_role)
+            answer = get_llm_answer(chain, request.question, context)
+
+    sources = [
+        {
+            "content": candidate.get("content"),
+            "source": candidate.get("source"),
+            "score": candidate.get("score"),
+        }
+        for candidate in candidates
+    ]    
+
+    return ChatResponse(
+        workspace_id=request.workspace_id,
+        question=request.question,
+        role=request.role,
+        answer=answer,
+        sources=sources,
+        stored_records=stored_records,
+        candidates=candidates,
+        llm_backend=llm_backend,
+        llm_model=llm_model,
+    )
 
 
 @app.post("/ingest")

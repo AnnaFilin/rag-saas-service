@@ -293,3 +293,41 @@ The `/chat` endpoint may accept an optional `backend` field:
   - Max requests per IP per day.
   - Target monthly budget.
 
+## API – /chat (initial contract)
+
+### Endpoint
+
+- `POST /chat`
+
+### Request body (JSON)
+
+```json
+{
+  "workspace_id": "string",
+  "question": "string",
+  "role": "optional string (can be null)"
+}
+
+
+## API – /ingest (initial contract)
+
+### Endpoint
+
+- `POST /ingest`
+
+### Request body (JSON, упрощённый вариант для начала)
+
+```json
+{
+  "workspace_id": "string",
+  "documents": [
+    {
+      "id": "optional string",
+      "text": "string",
+      "metadata": {
+        "source": "optional string",
+        "title": "optional string"
+      }
+    }
+  ]
+}
