@@ -145,7 +145,11 @@ async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...
         temp_file.close()
         doc = convert_to_markdown(temp_file.name)
         chunks = split_into_chunks(text=doc["content"], source=workspace_id)
+        embeddings, _ = create_embeddings(chunks)
+        store.add(workspace_id, chunks, embeddings)
+        stored_records = len(store.get_workspace(workspace_id))
         chunks_count = len(chunks)
+        embeddings_count = len(embeddings)
     finally:
         temp_file_path = temp_file.name
         if Path(temp_file_path).exists():
@@ -155,8 +159,8 @@ async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...
         "workspace_id": workspace_id,
         "ingested_count": 1,
         "chunks_count": chunks_count,
-        "embeddings_count": 0,
-        "stored_records": 0,
+        "embeddings_count": embeddings_count,
+        "stored_records": stored_records,
         "skipped": 0,
         "errors": [],
     }

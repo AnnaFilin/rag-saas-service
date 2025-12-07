@@ -20,20 +20,18 @@ def build_llm_chain(
     Must be called in the same process where .invoke() will run.
     """
     backend = os.getenv("LLM_BACKEND", "ollama").lower()
-    if backend != "ollama":
-     configured_model = os.getenv("LLM_MODEL", model_name)
+    configured_model = os.getenv("LLM_MODEL", model_name)
     configured_temperature = float(os.getenv("LLM_TEMPERATURE", temperature))
+
+    if backend != "ollama":
+        raise RuntimeError('Unsupported LLM_BACKEND; only "ollama" is implemented.')
+
     print(
         f"🔧 Initializing LLM backend={backend} model={configured_model} "
         f"temperature={configured_temperature}"
     )
 
-    if backend == "ollama":
-        llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
-    elif backend == "openai":
-        llm = ChatOpenAI(model=configured_model, temperature=configured_temperature)
-    else:
-        raise RuntimeError('Unsupported LLM_BACKEND; only "ollama" and "openai" are implemented.')
+    llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
 
     prompt = PromptTemplate(
         input_variables=["context", "question"],
@@ -52,7 +50,6 @@ def build_llm_chain(
     chain = prompt | llm
     print("🔧 Prompt template and chain created successfully.")
     return chain
-
 
 def retrieve_context(question: str, model, collection, n_results: int = 5):
     """
