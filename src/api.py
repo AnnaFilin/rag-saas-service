@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
+from pathlib import Path
+import tempfile
 from pydantic import BaseModel
+from src.load_docs import convert_to_markdown
 from src.process_texts import split_into_chunks
 from src.embeddings import create_embeddings
 from src.memory_store import store
@@ -128,6 +131,32 @@ def ingest(request: IngestRequest):
         "chunks_count": len(all_chunks),
         "embeddings_count": len(embeddings),
         "stored_records": stored_records,
+        "skipped": 0,
+        "errors": [],
+    }
+
+
+@app.post("/ingest-file")
+async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...)):
+    suffix = Path(file.filename or "").suffix or ".tmp"
+    temp_file = tempfile.NamedTemporaryFile("wb", delete=False, suffix=suffix)
+    try:
+        temp_file.write(await file.read())
+        temp_file.close()
+        doc = convert_to_markdown(temp_file.name)
+        chunks = split_into_chunks(text=doc["content"], source=workspace_id)
+        chunks_count = len(chunks)
+    finally:
+        temp_file_path = temp_file.name
+        if Path(temp_file_path).exists():
+            Path(temp_file_path).unlink()
+
+    return {
+        "workspace_id": workspace_id,
+        "ingested_count": 1,
+        "chunks_count": chunks_count,
+        "embeddings_count": 0,
+        "stored_records": 0,
         "skipped": 0,
         "errors": [],
     }
