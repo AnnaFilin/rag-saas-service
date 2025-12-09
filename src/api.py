@@ -7,6 +7,9 @@ from src.process_texts import split_into_chunks
 from src.embeddings import create_embeddings
 from src.memory_store import store
 from src.llm_pipeline import build_llm_chain, get_llm_answer
+from src.db import Base, engine, SessionLocal
+from src.models import Workspace, Document, Chunk  # noqa: F401
+from src.repository import create_document_with_chunks, get_top_k_chunks_for_workspace
 import os
 
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
@@ -16,8 +19,13 @@ DEFAULT_ROLE = (
     "If the context is not enough, say: 'I do not know based on the provided context.'"
 )
 
-
 app = FastAPI()
+
+
+@app.on_event("startup")
+def init_db():
+    Base.metadata.create_all(bind=engine)
+    print("🗄️ Database schema initialized.")
 
 class ChatRequest(BaseModel):
     workspace_id: str
@@ -56,27 +64,39 @@ def health_check():
     """Return a simple OK status for readiness/liveness checks."""
     return {"status": "ok"}
 
-
 @app.post("/chat")
 def chat(request: ChatRequest):
-    records = store.get_workspace(request.workspace_id)
-    stored_records = len(records)
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
 
-    if stored_records == 0:
-        answer = "This is a stub answer."
-        candidates = []
-    else:
-        query_chunks = [{"content": request.question}]
-        query_embeddings, _ = create_embeddings(query_chunks)
-        query_vector = query_embeddings[0].tolist()
-        candidates = store.top_k_similar(
+    query_chunks = [{"content": request.question}]
+    query_embeddings, _ = create_embeddings(query_chunks)
+    query_vector = query_embeddings[0].tolist()
+
+    db = SessionLocal()
+    try:
+        chunk_objs = get_top_k_chunks_for_workspace(
+            db=db,
             workspace_id=request.workspace_id,
             query_embedding=query_vector,
             k=3,
         )
-        context_parts = [c["content"] for c in candidates if "content" in c]
+        candidates = [
+            {
+                "content": chunk.content,
+                "source": getattr(chunk.document, "source", None),
+                "score": None,
+            }
+            for chunk in chunk_objs
+        ]
+        stored_records = len(candidates)
+    finally:
+        db.close()
+
+    if stored_records == 0:
+        answer = "This is a stub answer."
+    else:
+        context_parts = [c["content"] for c in candidates if c["content"]]
         context = "\n\n---\n\n".join(context_parts)
 
         if not LLM_ENABLED:
@@ -97,7 +117,7 @@ def chat(request: ChatRequest):
             "score": candidate.get("score"),
         }
         for candidate in candidates
-    ]    
+    ]
 
     return ChatResponse(
         workspace_id=request.workspace_id,
@@ -110,7 +130,6 @@ def chat(request: ChatRequest):
         llm_backend=llm_backend,
         llm_model=llm_model,
     )
-
 
 @app.post("/ingest")
 def ingest(request: IngestRequest):
@@ -135,22 +154,46 @@ def ingest(request: IngestRequest):
         "errors": [],
     }
 
-
 @app.post("/ingest-file")
 async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...)):
     suffix = Path(file.filename or "").suffix or ".tmp"
     temp_file = tempfile.NamedTemporaryFile("wb", delete=False, suffix=suffix)
+
     try:
+        # Save uploaded file to a temporary location
         temp_file.write(await file.read())
         temp_file.close()
+
+        # Convert file to markdown/text
         doc = convert_to_markdown(temp_file.name)
+
+        # Split into chunks and create embeddings
         chunks = split_into_chunks(text=doc["content"], source=workspace_id)
         embeddings, _ = create_embeddings(chunks)
+
+        # Store in in-memory store (existing behavior)
         store.add(workspace_id, chunks, embeddings)
+
+        # Persist to Postgres
+        db = SessionLocal()
+        try:
+            create_document_with_chunks(
+                db=db,
+                workspace_id=workspace_id,
+                source=doc.get("source", workspace_id),
+                chunks=chunks,
+                embeddings=embeddings,
+            )
+        finally:
+            db.close()
+
+        # Stats for the response
         stored_records = len(store.get_workspace(workspace_id))
         chunks_count = len(chunks)
         embeddings_count = len(embeddings)
+
     finally:
+        # Always delete the temporary file
         temp_file_path = temp_file.name
         if Path(temp_file_path).exists():
             Path(temp_file_path).unlink()
