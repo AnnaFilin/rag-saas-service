@@ -23,15 +23,26 @@ def build_llm_chain(
     configured_model = os.getenv("LLM_MODEL", model_name)
     configured_temperature = float(os.getenv("LLM_TEMPERATURE", temperature))
 
-    if backend != "ollama":
-        raise RuntimeError('Unsupported LLM_BACKEND; only "ollama" is implemented.')
-
     print(
         f"🔧 Initializing LLM backend={backend} model={configured_model} "
         f"temperature={configured_temperature}"
     )
 
-    llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
+    if backend == "ollama":
+        llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
+    elif backend == "openai":
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required when using the OpenAI backend.")
+        llm = ChatOpenAI(
+            model=configured_model,
+            temperature=configured_temperature,
+            openai_api_key=api_key,
+        )
+    else:
+        raise ValueError(
+            'Unsupported LLM_BACKEND; only "ollama" and "openai" are implemented.'
+        )
 
     prompt = PromptTemplate(
         input_variables=["context", "question"],
@@ -51,6 +62,7 @@ def build_llm_chain(
     print("🔧 Prompt template and chain created successfully.")
     return chain
 
+
 def retrieve_context(question: str, model, collection, n_results: int = 5):
     """
     Retrieve relevant text chunks from the Chroma collection.
@@ -69,12 +81,17 @@ def retrieve_context(question: str, model, collection, n_results: int = 5):
 
 def get_llm_answer(chain, question: str, context: str) -> str:
     """
-    Generate an answer from LLM given a question and context.
+    Run the chain and always return a plain string answer,
+    regardless of whether the LLM returns a string or an AIMessage-like object.
     """
-    print("🚀 Sending request to LLM...")
-    answer = chain.invoke({"context": context[:2000], "question": question})
-    print("✅ LLM responded successfully.")
-    return answer
+    result = chain.invoke({"question": question, "context": context})
+
+    # If the result is an AIMessage (has a .content) — take the content.
+    if hasattr(result, "content"):
+        return result.content
+
+    # Otherwise just cast to string (in case it's already str or something similar).
+    return str(result)
 
 
 def format_response(question: str, answer: str, sources: list) -> str:
