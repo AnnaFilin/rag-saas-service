@@ -1,6 +1,7 @@
 import os
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from src.db import Base, SessionLocal, engine
@@ -17,6 +18,13 @@ DEFAULT_ROLE = (
 )
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 
 @app.on_event("startup")
@@ -46,6 +54,16 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/workspaces")
+def list_workspaces():
+    db = SessionLocal()
+    try:
+        rows = db.query(Workspace).all()
+        return {"workspaces": [workspace.id for workspace in rows]}
+    finally:
+        db.close()
 
 
 @app.post("/chat")

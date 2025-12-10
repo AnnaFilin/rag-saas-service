@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.db import Base, SessionLocal, engine
 from src.load_docs import convert_to_markdown
@@ -12,7 +13,13 @@ from src.models import Workspace, Document, Chunk  # noqa: F401
 
 
 app = FastAPI()
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 @app.on_event("startup")
 def init_db():
