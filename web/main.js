@@ -1,3 +1,6 @@
+const CHAT_URL = "http://localhost:8000/chat";
+const INGEST_URL = "https://rag-saas-ingest-630957115938.me-west1.run.app/ingest-file";
+
 (function () {
     setupChat();
     setupIngest();
@@ -54,7 +57,7 @@
         //     },
         //   );
         const response = await fetch(
-            "http://localhost:8000/chat",   
+            CHAT_URL,   
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -116,7 +119,7 @@
   
         try {
           const response = await fetch(
-            "https://rag-saas-ingest-630957115938.me-west1.run.app/ingest-file",
+            INGEST_URL,
             {
               method: "POST",
               body: formData,

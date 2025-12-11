@@ -38,3 +38,10 @@ dist/
 # Local data / artifacts (при необходимости расширишь)
 *.sqlite3
 *.db
+
+
+# Node / frontend
+node_modules/
+ui/rag-admin-ui/node_modules/
+dist/
+package-lock.json
