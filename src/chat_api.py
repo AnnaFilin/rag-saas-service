@@ -13,7 +13,9 @@ from src.repository import get_top_k_chunks_for_workspace
 from src.models import Workspace, Document, Chunk, Note  # noqa: F401
 
 TOP_K = int(os.getenv("TOP_K", "10"))
-
+QUERY_REWRITE_ENABLED = os.getenv("QUERY_REWRITE_ENABLED", "true").lower() == "true"
+QUERY_REWRITE_N = int(os.getenv("QUERY_REWRITE_N", "3"))
+QUERY_REWRITE_TOP_K_PER_QUERY = int(os.getenv("QUERY_REWRITE_TOP_K_PER_QUERY", "5"))
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
 DEFAULT_ROLE = (
     "You are a helpful assistant that answers only based on the provided context. "
@@ -28,6 +30,74 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+def _rewrite_queries(question: str) -> list[str]:
+    """
+    Generate a few alternative search queries for better retrieval.
+    Uses the same LLM backend. If rewriting fails, returns the original question.
+    """
+    if not LLM_ENABLED or not QUERY_REWRITE_ENABLED:
+        return [question]
+
+    rewrite_role = (
+        "You rewrite a user's question into short search queries for semantic retrieval.\n"
+        "Return 3 alternative queries (one per line), no numbering, no extra text.\n"
+        "Use synonyms and related phrases that may appear in books.\n"
+        "Do NOT answer the question."
+    )
+
+    try:
+        chain = build_llm_chain(rewrite_role)
+        raw = get_llm_answer(chain, question, context="")
+        lines = [line.strip(" -\t\r\n") for line in raw.splitlines() if line.strip()]
+        queries = []
+        for q in lines:
+            if q and q.lower() != question.lower():
+                queries.append(q)
+        # Always include the original question as well.
+        merged = [question] + queries
+        # Deduplicate preserving order.
+        seen = set()
+        out = []
+        for q in merged:
+            key = q.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(q)
+        return out[: max(1, QUERY_REWRITE_N + 1)]
+    except Exception:
+        return [question]
+
+
+def _retrieve_candidates(db: Session, workspace_id: str, questions: list[str], k_per_query: int) -> list[Chunk]:
+    """
+    Retrieve top chunks for each query and merge results (unique by chunk id).
+    """
+    merged: list[Chunk] = []
+    seen_ids: set[int] = set()
+
+    for q in questions:
+        query_chunks = [{"content": q}]
+        query_embeddings, _ = create_embeddings(query_chunks)
+        query_vector = query_embeddings[0].tolist()
+
+        chunk_objs = get_top_k_chunks_for_workspace(
+            db=db,
+            workspace_id=workspace_id,
+            query_embedding=query_vector,
+            k=k_per_query,
+        )
+
+        for ch in chunk_objs:
+            ch_id = getattr(ch, "id", None)
+            if ch_id is None:
+                merged.append(ch)
+                continue
+            if ch_id not in seen_ids:
+                seen_ids.add(ch_id)
+                merged.append(ch)
+
+    return merged
 
 
 @app.on_event("startup")
@@ -158,18 +228,20 @@ def chat(request: ChatRequest):
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
 
-    query_chunks = [{"content": request.question}]
-    query_embeddings, _ = create_embeddings(query_chunks)
-    query_vector = query_embeddings[0].tolist()
+    search_queries = _rewrite_queries(request.question)
 
     db = SessionLocal()
     try:
-        chunk_objs = get_top_k_chunks_for_workspace(
+        chunk_objs = _retrieve_candidates(
             db=db,
             workspace_id=request.workspace_id,
-            query_embedding=query_vector,
-            k=TOP_K,
+            questions=search_queries,
+            k_per_query=QUERY_REWRITE_TOP_K_PER_QUERY if (QUERY_REWRITE_ENABLED and LLM_ENABLED) else TOP_K,
         )
+
+        # Hard cap total candidates to TOP_K (keep first ones).
+        chunk_objs = chunk_objs[:TOP_K]
+
         candidates = [
             {
                 "content": chunk.content,
@@ -181,6 +253,7 @@ def chat(request: ChatRequest):
         stored_records = len(candidates)
     finally:
         db.close()
+
 
     if stored_records == 0:
         answer = "This is a stub answer."

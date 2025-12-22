@@ -14,10 +14,12 @@ let saveTimerId = null
 const answer = ref('')
 const sources = ref([])
 
-// const API_URL = 'https://rag-saas-rag-630957115938.me-west1.run.app/chat'
-// const API_URL = 'http://localhost:8000/chat'
-const API_URL = '/api/rag/chat'
+const chatMode = ref('cloud') // 'cloud' | 'local'
 
+const CHAT_ENDPOINTS = {
+  cloud: '/api/rag/chat',
+  local: 'http://localhost:8000/chat',
+}
 
 
 const emit = defineEmits(['save-note'])
@@ -52,9 +54,11 @@ async function submitQuestion() {
   errorText.value = ''
   answer.value = ''
   sources.value = []
+  const endpoint = CHAT_ENDPOINTS[chatMode.value]
+
 
   try {
-    const response = await fetch(API_URL, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -141,6 +145,28 @@ function saveCurrentNote() {
           <div class="h-2 rounded-full bg-emerald-500" :class="isLoading ? 'w-12 animate-pulse' : 'w-6'"></div>
         </div>
       </div>
+      <div class="flex items-center gap-3 text-xs text-slate-300">
+  <span class="uppercase tracking-wider text-slate-400">Chat mode</span>
+
+  <label class="flex items-center gap-1 cursor-pointer">
+    <input
+      type="radio"
+      value="cloud"
+      v-model="chatMode"
+    />
+    <span>Cloud</span>
+  </label>
+
+  <label class="flex items-center gap-1 cursor-pointer">
+    <input
+      type="radio"
+      value="local"
+      v-model="chatMode"
+    />
+    <span>Local</span>
+  </label>
+</div>
+
       <div class="flex justify-end">
         <button
           class="rounded-full border border-emerald-400 px-4 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-emerald-300 hover:border-emerald-200"
