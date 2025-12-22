@@ -1,0 +1,10 @@
+Workspace overview
+
+This workspace contains documents related to a RAG SaaS prototype.
+
+Main components:
+- FastAPI backend
+- PostgreSQL database with pgvector
+- Vue 3 admin interface
+
+Documents uploaded to this workspace are indexed and used for semantic search.

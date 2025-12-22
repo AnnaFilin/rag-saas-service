@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pgvector.sqlalchemy import Vector
@@ -47,3 +47,28 @@ class Chunk(Base):
 
     def __repr__(self) -> str:
         return f"<Chunk(document_id={self.document_id}, index={self.index})>"
+
+class Note(Base):
+    __tablename__ = "notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id"),
+        index=True,
+        nullable=False,
+    )
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    workspace: Mapped["Workspace"] = relationship("Workspace")
+
+    def __repr__(self) -> str:
+        return f"<Note(id={self.id}, workspace_id={self.workspace_id!r})>"

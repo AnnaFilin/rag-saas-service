@@ -2,7 +2,7 @@ fastapi
 uvicorn
 numpy
 requests
-markitdown
+markitdown[pdf]
 sentence-transformers
 langchain-core
 langchain-ollama

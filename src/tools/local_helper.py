@@ -1,41 +1,35 @@
-import tempfile
 from pathlib import Path
+import tempfile
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
-from src.db import Base, SessionLocal, engine
+from src.db import SessionLocal
 from src.load_docs import convert_to_markdown
 from src.process_texts import split_into_chunks
 from src.embeddings import create_embeddings
 from src.repository import create_document_with_chunks
-from src.models import Workspace, Document, Chunk  # noqa: F401
-
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:5173"],
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def init_db():
-    Base.metadata.create_all(bind=engine)
-    print("🗄️ Database schema initialized.")
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
 
 @app.post("/ingest-file")
-async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...)):
+async def ingest_file(
+    workspace_id: str = Form(...),
+    file: UploadFile = File(...)
+):
     suffix = Path(file.filename or "").suffix or ".tmp"
     temp_file = tempfile.NamedTemporaryFile("wb", delete=False, suffix=suffix)
+
     try:
         temp_file.write(await file.read())
         temp_file.close()
@@ -46,17 +40,25 @@ async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...
 
         db = SessionLocal()
         try:
-            create_document_with_chunks(db, workspace_id, doc.get("source", workspace_id), chunks, embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings)
+            create_document_with_chunks(
+                db,
+                workspace_id,
+                doc.get("source", workspace_id),
+                chunks,
+                embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings,
+            )
         finally:
             db.close()
 
         return {
             "workspace_id": workspace_id,
             "chunks_count": len(chunks),
-            "embeddings_count": len(embeddings),
-            "stored_records": len(chunks),
-            "errors": [],
+            "status": "ready",
         }
+
     finally:
-        if Path(temp_file.name).exists():
-            Path(temp_file.name).unlink()
+        Path(temp_file.name).unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=7777)

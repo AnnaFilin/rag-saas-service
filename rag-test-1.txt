@@ -1,0 +1,2 @@
+Cloud ingest test.
+Embeddings model: multi-qa-mpnet-base-dot-v1 (768)

@@ -3,13 +3,16 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import select, distinct
+from sqlalchemy.orm import Session
 
 from src.db import Base, SessionLocal, engine
 from src.embeddings import create_embeddings
 from src.llm_pipeline import build_llm_chain, get_llm_answer
 from src.repository import get_top_k_chunks_for_workspace
-from src.models import Workspace, Document, Chunk  # noqa: F401
+from src.models import Workspace, Document, Chunk, Note  # noqa: F401
 
+TOP_K = int(os.getenv("TOP_K", "10"))
 
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
 DEFAULT_ROLE = (
@@ -20,7 +23,7 @@ DEFAULT_ROLE = (
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500"],
+    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:5173"],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=False,
@@ -51,6 +54,31 @@ class ChatResponse(BaseModel):
     llm_model: str
 
 
+class NoteCreateRequest(BaseModel):
+    workspace_id: str
+    question: str
+    answer: str
+    sources: list[dict] = []
+
+
+class NoteCreateResponse(BaseModel):
+    id: int
+    workspace_id: str
+    created_at: str
+
+class NoteOut(BaseModel):
+    id: int
+    workspace_id: str
+    question: str
+    answer: str
+    sources: list[dict] = []
+    created_at: str
+
+
+class NotesListResponse(BaseModel):
+    notes: list[NoteOut]
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -58,10 +86,69 @@ def health_check():
 
 @app.get("/workspaces")
 def list_workspaces():
-    db = SessionLocal()
+    db: Session = SessionLocal()
     try:
-        rows = db.query(Workspace).all()
-        return {"workspaces": [workspace.id for workspace in rows]}
+        workspaces = []
+        results = db.execute(
+            select(distinct(Document.workspace_id)).order_by(Document.workspace_id)
+        ).scalars().all()
+        workspaces = [ws for ws in results if ws]
+        if not workspaces:
+            rows = db.query(Workspace).all()
+            workspaces = [workspace.id for workspace in rows]
+        return {"workspaces": workspaces}
+    finally:
+        db.close()
+
+
+@app.post("/notes")
+def create_note(request: NoteCreateRequest):
+    db: Session = SessionLocal()
+    try:
+        note = Note(
+            workspace_id=request.workspace_id,
+            question=request.question,
+            answer=request.answer,
+            sources=request.sources or [],
+        )
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+
+        return NoteCreateResponse(
+            id=note.id,
+            workspace_id=note.workspace_id,
+            created_at=note.created_at.isoformat() if note.created_at else "",
+        )
+    finally:
+        db.close()
+
+
+@app.get("/notes")
+def list_notes(workspace_id: str):
+    db: Session = SessionLocal()
+    try:
+        rows = (
+            db.query(Note)
+            .filter(Note.workspace_id == workspace_id)
+            .order_by(Note.created_at.desc())
+            .all()
+        )
+
+        notes = []
+        for n in rows:
+            notes.append(
+                NoteOut(
+                    id=n.id,
+                    workspace_id=n.workspace_id,
+                    question=n.question,
+                    answer=n.answer,
+                    sources=n.sources or [],
+                    created_at=n.created_at.isoformat() if n.created_at else "",
+                )
+            )
+
+        return NotesListResponse(notes=notes)
     finally:
         db.close()
 
@@ -81,7 +168,7 @@ def chat(request: ChatRequest):
             db=db,
             workspace_id=request.workspace_id,
             query_embedding=query_vector,
-            k=3,
+            k=TOP_K,
         )
         candidates = [
             {
