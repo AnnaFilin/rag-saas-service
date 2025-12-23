@@ -10,11 +10,11 @@ const role = ref('')
 const isLoading = ref(false)
 const errorText = ref('')
 const saveStatus = ref('')
-let saveTimerId = null
+const ragMode = ref('reference')
 const answer = ref('')
 const sources = ref([])
-
 const chatMode = ref('cloud') // 'cloud' | 'local'
+let saveTimerId = null
 
 const CHAT_ENDPOINTS = {
   cloud: '/api/rag/chat',
@@ -64,7 +64,8 @@ async function submitQuestion() {
       body: JSON.stringify({
         workspace_id: props.workspaceId,
         question: question.value,
-        role: role.value.trim() ? role.value : null,
+        mode: ragMode.value, // "reference" | "synthesis" | "custom"
+        role: ragMode.value === 'custom' && role.value.trim() ? role.value : null,
       }),
     })
 
@@ -120,13 +121,56 @@ function saveCurrentNote() {
         rows="3"
         placeholder="Type your question..."
       ></textarea>
-      <label class="text-sm font-semibold text-slate-300">Role (optional)</label>
-      <input
-        v-model="role"
-        class="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-slate-500"
-        type="text"
-        placeholder="e.g. Researcher, Engineer, Editor..."
-      />
+    <!-- Mode + Role (replace your current Mode/Role block with this whole block) -->
+<div class="flex flex-col gap-2">
+  <label class="text-sm font-semibold text-slate-300">Mode</label>
+
+  <div class="flex flex-wrap gap-2">
+    <button
+      type="button"
+      class="px-3 py-1 text-xs rounded border"
+      :class="ragMode === 'reference'
+        ? 'bg-slate-800 border-slate-500 text-white'
+        : 'bg-transparent border-slate-700 text-slate-400'"
+      @click="ragMode = 'reference'"
+    >
+      Reference
+    </button>
+
+    <button
+      type="button"
+      class="px-3 py-1 text-xs rounded border"
+      :class="ragMode === 'synthesis'
+        ? 'bg-slate-800 border-slate-500 text-white'
+        : 'bg-transparent border-slate-700 text-slate-400'"
+      @click="ragMode = 'synthesis'"
+    >
+      Synthesis
+    </button>
+
+    <button
+      type="button"
+      class="px-3 py-1 text-xs rounded border"
+      :class="ragMode === 'custom'
+        ? 'bg-slate-800 border-slate-500 text-white'
+        : 'bg-transparent border-slate-700 text-slate-400'"
+      @click="ragMode = 'custom'"
+    >
+      Custom
+    </button>
+  </div>
+
+  <div v-if="ragMode === 'custom'" class="mt-2 flex flex-col gap-2">
+    <label class="text-sm font-semibold text-slate-300">Role (custom)</label>
+    <textarea
+      v-model="role"
+      class="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-slate-500"
+      rows="3"
+      placeholder="Custom instruction for the assistant..."
+    ></textarea>
+  </div>
+</div>
+
       <div class="flex items-center justify-between space-x-3">
         <span class="text-sm text-slate-400">
           <div v-if="isLoading" class="flex items-center gap-2">

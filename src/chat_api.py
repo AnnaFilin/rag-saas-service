@@ -22,6 +22,14 @@ DEFAULT_ROLE = (
     "If the context is not enough, say: 'I do not know based on the provided context.'"
 )
 
+SYNTHESIS_ROLE = (
+    "You are a helpful assistant. Use ONLY the provided context. "
+    "Synthesize an answer by combining information from multiple context chunks. "
+    "Do NOT use external knowledge. "
+    "If the context is insufficient, say: 'I do not know based on the provided context.'"
+)
+
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +118,8 @@ class ChatRequest(BaseModel):
     workspace_id: str
     question: str
     role: str | None = None
+    mode: str | None = "reference"  # "reference" | "synthesis" | "custom"
+
 
 
 class ChatResponse(BaseModel):
@@ -122,6 +132,7 @@ class ChatResponse(BaseModel):
     candidates: list[dict]
     llm_backend: str
     llm_model: str
+    mode: str | None = None
 
 
 class NoteCreateRequest(BaseModel):
@@ -264,11 +275,19 @@ def chat(request: ChatRequest):
         if not LLM_ENABLED:
             answer = "LLM is temporarily disabled. Please try again later."
         else:
-            effective_role = (
-                request.role.strip()
-                if request.role and request.role.strip()
-                else DEFAULT_ROLE
-            )
+            mode = (request.mode or "reference").strip().lower()
+
+            if mode == "synthesis":
+                effective_role = SYNTHESIS_ROLE
+            elif mode == "custom":
+                effective_role = (
+                    request.role.strip()
+                    if request.role and request.role.strip()
+                    else DEFAULT_ROLE
+                )
+            else:  # reference
+                effective_role = DEFAULT_ROLE
+
             chain = build_llm_chain(effective_role)
             answer = get_llm_answer(chain, request.question, context)
 
@@ -291,4 +310,5 @@ def chat(request: ChatRequest):
         candidates=candidates,
         llm_backend=llm_backend,
         llm_model=llm_model,
+        mode=request.mode,
     )
