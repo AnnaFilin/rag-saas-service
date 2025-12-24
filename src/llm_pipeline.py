@@ -63,20 +63,20 @@ def build_llm_chain(
     return chain
 
 
-def retrieve_context(question: str, model, collection, n_results: int = 5):
-    """
-    Retrieve relevant text chunks from the Chroma collection.
-    Returns (context_string, documents_list).
-    """
-    query_emb = model.encode([question])
-    results = collection.query(
-        query_embeddings=query_emb.tolist(),
-        n_results=n_results,
-        include=["documents", "metadatas", "distances"],
-    )
-    documents = results["documents"][0]
-    context = "\n\n---SECTION---\n\n".join(documents)
-    return context, documents
+# def retrieve_context(question: str, model, collection, n_results: int = 5):
+#     """
+#     Retrieve relevant text chunks from the Chroma collection.
+#     Returns (context_string, documents_list).
+#     """
+#     query_emb = model.encode([question])
+#     results = collection.query(
+#         query_embeddings=query_emb.tolist(),
+#         n_results=n_results,
+#         include=["documents", "metadatas", "distances"],
+#     )
+#     documents = results["documents"][0]
+#     context = "\n\n---SECTION---\n\n".join(documents)
+#     return context, documents
 
 
 def get_llm_answer(chain, question: str, context: str) -> str:
@@ -107,30 +107,30 @@ def format_response(question: str, answer: str, sources: list) -> str:
     return response
 
 
-def enhanced_query_with_llm(question: str, model, collection, chain, n_results: int = 5) -> str:
-    """
-    Full pipeline (retrieve -> generate -> format). The 'chain' is created by the caller.
-    """
-    context, documents = retrieve_context(question, model, collection, n_results)
-    print("🧩 Retrieved context preview:")
-    print(context[:500] + "...\n")
-    answer = get_llm_answer(chain, question, context)
-    return format_response(question, answer, documents)
+# def enhanced_query_with_llm(question: str, model, collection, chain, n_results: int = 5) -> str:
+#     """
+#     Full pipeline (retrieve -> generate -> format). The 'chain' is created by the caller.
+#     """
+#     context, documents = retrieve_context(question, model, collection, n_results)
+#     print("🧩 Retrieved context preview:")
+#     print(context[:500] + "...\n")
+#     answer = get_llm_answer(chain, question, context)
+#     return format_response(question, answer, documents)
 
 
-if __name__ == "__main__":
-    # Direct diagnostic run (optional)
-    from sentence_transformers import SentenceTransformer
-    import chromadb
+# if __name__ == "__main__":
+#     # Direct diagnostic run (optional)
+#     from sentence_transformers import SentenceTransformer
+#     import chromadb
 
-    model = SentenceTransformer("multi-qa-mpnet-base-dot-v1")
-    client = chromadb.PersistentClient(path="./data/index/chroma_db")
-    collection = client.get_or_create_collection(name="python_guide")
+#     model = SentenceTransformer("multi-qa-mpnet-base-dot-v1")
+#     client = chromadb.PersistentClient(path="./data/index/chroma_db")
+#     collection = client.get_or_create_collection(name="python_guide")
 
-    chain = build_llm_chain(
-        "You are a helpful assistant for a small software project. Answer only based on context."
-    )
-    question = "What is a function in Python?"
-    ctx = "A function is a block of code that performs a specific task when called."
-    print("🚀 Testing direct LLM invocation...")
-    print(get_llm_answer(chain, question, ctx))
+#     chain = build_llm_chain(
+#         "You are a helpful assistant for a small software project. Answer only based on context."
+#     )
+#     question = "What is a function in Python?"
+#     ctx = "A function is a block of code that performs a specific task when called."
+#     print("🚀 Testing direct LLM invocation...")
+#     print(get_llm_answer(chain, question, ctx))

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.load_docs import convert_to_markdown
 from src.process_texts import split_into_chunks
 from src.embeddings import create_embeddings
-from src.memory_store import store
+from src.legacy_memory_store import store
 from src.llm_pipeline import build_llm_chain, get_llm_answer
 from src.db import Base, engine, SessionLocal
 from src.models import Workspace, Document, Chunk  # noqa: F401

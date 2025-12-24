@@ -48,8 +48,8 @@ def analyze_chunks(chunks: list):
     print(f"  - Sources: {dict(counts)}\n")
 
 
-if __name__ == "__main__":
-    # Example run for testing
-    sample_text = "Python is great.\n\nFunctions define reusable logic.\nLoops repeat actions."
-    chunks = split_into_chunks(sample_text, source="sample.txt")
-    analyze_chunks(chunks)
+# if __name__ == "__main__":
+#     # Example run for testing
+#     sample_text = "Python is great.\n\nFunctions define reusable logic.\nLoops repeat actions."
+#     chunks = split_into_chunks(sample_text, source="sample.txt")
+#     analyze_chunks(chunks)

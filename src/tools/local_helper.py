@@ -1,3 +1,5 @@
+# DEV TOOL: local ingest helper for UI (http://127.0.0.1:7777)
+
 from pathlib import Path
 import tempfile
 
