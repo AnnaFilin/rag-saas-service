@@ -41,12 +41,20 @@ async def ingest_file(workspace_id: str = Form(...), file: UploadFile = File(...
         temp_file.close()
 
         doc = convert_to_markdown(temp_file.name)
-        chunks = split_into_chunks(text=doc["content"], source=workspace_id)
+        source = file.filename or doc.get("source") or "upload"
+
+        chunks = split_into_chunks(text=doc["content"], source=source)
         embeddings, _ = create_embeddings(chunks)
 
         db = SessionLocal()
         try:
-            create_document_with_chunks(db, workspace_id, doc.get("source", workspace_id), chunks, embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings)
+            create_document_with_chunks(
+                db,
+                workspace_id,
+                source,
+                chunks,
+                embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings,
+            )
         finally:
             db.close()
 

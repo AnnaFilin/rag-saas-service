@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   workspaceId: { type: String, required: true },
@@ -13,7 +13,7 @@ const saveStatus = ref('')
 const ragMode = ref('reference')
 const answer = ref('')
 const sources = ref([])
-const chatMode = ref('cloud') // 'cloud' | 'local'
+const chatMode = ref('local') // 'cloud' | 'local'
 let saveTimerId = null
 
 const CHAT_ENDPOINTS = {
@@ -26,26 +26,44 @@ const emit = defineEmits(['save-note'])
 
 const SOURCES_PREVIEW_LEN = 220
 
-function truncateText(text, maxLen = SOURCES_PREVIEW_LEN) {
-  const s = String(text || '').replace(/\s+/g, ' ').trim()
-  if (!s) return ''
-  if (s.length <= maxLen) return s
-  return s.slice(0, maxLen) + '…'
+const showAllSources = ref(false)
+
+const visibleSources = computed(() => {
+  const list = Array.isArray(sources.value) ? sources.value : []
+  return showAllSources.value ? list : list.slice(0, 5)
+})
+
+const expandedSourceKey = ref(null)
+
+function sourceKey(source, idx) {
+  return `${source?.document_id ?? 'doc'}:${source?.chunk_index ?? 'idx'}:${idx}`
 }
 
-function sourceLabel(source, idx) {
-  const base = source?.source ? String(source.source) : `Source ${idx + 1}`
-  return truncateText(base, 80)
+function toggleSource(source, idx) {
+  const key = sourceKey(source, idx)
+  expandedSourceKey.value = expandedSourceKey.value === key ? null : key
 }
 
-function sourcePreview(source) {
-  const raw = (source?.content ?? '').toString()
-  const text = raw.replace(/\s+/g, ' ').trim()
-  return truncateText(text, SOURCES_PREVIEW_LEN)
+
+function sourcePreviewText(source) {
+  const text = String(source?.content || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > SOURCES_PREVIEW_LEN
+    ? text.slice(0, SOURCES_PREVIEW_LEN) + '…'
+    : text
+}
+
+function sourceTitle(source) {
+  const raw = source?.source || ''
+  const file = String(raw).split('/').pop() || raw
+  const idx = source?.chunk_index
+  return idx == null ? file : `${file} • chunk ${idx}`
 }
 
 
 async function submitQuestion() {
+    showAllSources.value = false
+
   if (!question.value.trim()) {
     return
   }
@@ -74,6 +92,10 @@ async function submitQuestion() {
     }
 
     const data = await response.json()
+
+    console.log('endpoint:', endpoint)
+console.log('source sample:', data.sources?.[0])
+
     answer.value = data.answer || ''
     sources.value = Array.isArray(data.sources) ? data.sources : []
   } catch (error) {
@@ -83,30 +105,51 @@ async function submitQuestion() {
   }
 }
 
-
-
 function saveCurrentNote() {
   if (!answer.value.trim()) return
   if (!props.workspaceId) return
 
-  saveStatus.value = 'saving'
+  const normalizedSources = (sources.value || [])
+    .map((item) => {
+      if (!item) return null
+      if (typeof item === 'string') {
+        const trimmed = item.trim()
+        return { source: trimmed || 'Unknown source' }
+      }
+      if (typeof item === 'object') {
+        const sourceValue = (item.source || '').toString().trim() || 'Unknown source'
+        return {
+          source: sourceValue,
+          chunk_index: item.chunk_index,
+          chunk_id: item.chunk_id,
+          content: item.content,
+        }
+      }
+      return null
+    })
+    .filter(Boolean)
 
+  saveStatus.value = 'saving'
+  if (saveTimerId) {
+    clearTimeout(saveTimerId)
+    saveTimerId = null
+  }
 
   emit('save-note', {
     question: question.value,
     answer: answer.value,
-    sources: sources.value,
+    sources: normalizedSources,
     workspaceId: props.workspaceId,
     createdAt: new Date().toISOString(),
   })
-   // UI-only feedback (since notes are local for now)
-   saveStatus.value = 'saved'
 
-    if (saveTimerId) clearTimeout(saveTimerId)
-    saveTimerId = setTimeout(() => {
+  saveStatus.value = 'saved'
+  saveTimerId = setTimeout(() => {
     saveStatus.value = ''
-    }, 1500)
+    saveTimerId = null
+  }, 2500)
 }
+
 
 
 </script>
@@ -249,21 +292,43 @@ function saveCurrentNote() {
         </div>
         <div class="mt-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
   <ul class="space-y-2 text-slate-300">
+
     <li
-      v-for="(source, idx) in sources"
-      :key="source.source || idx"
-      class="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
-    >
-      <div class="text-[11px] uppercase tracking-[0.18em] text-slate-500 truncate">
-        {{ sourceLabel(source) }}
-      </div>
+  v-for="(source, idx) in visibleSources"
+  :key="sourceKey(source, idx)"
+  class="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 cursor-pointer"
+  @click="toggleSource(source, idx)"
+>
+  <div class="text-[11px] uppercase tracking-[0.18em] text-slate-500 truncate">
+    {{ sourceTitle(source) }}
+  </div>
 
-      <div class="mt-1 text-sm text-slate-200 break-all overflow-x-hidden">
-  {{ sourcePreview(source) }}
+  <div class="mt-1 text-sm text-slate-200 whitespace-pre-wrap">
+    <span v-if="expandedSourceKey === sourceKey(source, idx)">
+      {{ source?.content || '' }}
+    </span>
+    <span v-else>
+      {{ sourcePreviewText(source) }}
+    </span>
+  </div>
+
+  <div class="mt-2 text-[11px] text-slate-500">
+    {{ expandedSourceKey === sourceKey(source, idx) ? 'Click to collapse' : 'Click to expand' }}
+  </div>
+</li>
+
+
+
+</ul>
+<div v-if="sources.length > 5" class="mt-2">
+  <button
+    type="button"
+    class="text-xs text-slate-400 hover:text-slate-200 underline underline-offset-4"
+    @click="showAllSources = !showAllSources"
+  >
+    {{ showAllSources ? 'Show less' : `Show all (${sources.length})` }}
+  </button>
 </div>
-
-    </li>
-  </ul>
 </div>
 </div>
       </div>
