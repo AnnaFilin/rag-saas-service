@@ -1,7 +1,7 @@
 
 from src.models import Chunk, Document, Workspace
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import text
 
 
@@ -10,15 +10,58 @@ def get_top_k_chunks_for_workspace(
     workspace_id: str,
     query_embedding: list[float],
     k: int = 3,
-) -> list[Chunk]:
+) -> list[tuple[Chunk, float]]:
+    distance = Chunk.embedding.cosine_distance(query_embedding)
+
     stmt = (
-        select(Chunk)
+        select(Chunk, distance.label("distance"))
         .join(Document)
         .where(Document.workspace_id == workspace_id)
-        .order_by(Chunk.embedding.l2_distance(query_embedding))
+        .options(selectinload(Chunk.document))
+        .order_by(distance)  # lower distance = more similar
         .limit(k)
     )
-    return db.scalars(stmt).all()
+
+    rows = db.execute(stmt).all()
+    return [(chunk, float(dist)) for (chunk, dist) in rows]
+
+# def get_top_k_chunks_for_workspace(
+#     db: Session,
+#     workspace_id: str,
+#     query_embedding: list[float],
+#     k: int = 10,
+# ) -> list[tuple[Chunk, float]]:
+#     """
+#     Returns (chunk, distance) pairs.
+#     Lower distance => more similar.
+#     """
+#     distance = Chunk.embedding.cosine_distance(query_embedding).label("distance")
+
+#     stmt = (
+#         select(Chunk, distance)
+#         .join(Document)
+#         .where(Document.workspace_id == workspace_id)
+#         .options(selectinload(Chunk.document))
+#         .order_by(distance.asc())
+#         .limit(k)
+#     )
+
+#     rows = db.execute(stmt).all()
+#     return [(chunk, float(dist) if dist is not None else 999.0) for chunk, dist in rows]
+# def get_top_k_chunks_for_workspace(
+#     db: Session,
+#     workspace_id: str,
+#     query_embedding: list[float],
+#     k: int = 3,
+# ) -> list[Chunk]:
+#     stmt = (
+#         select(Chunk)
+#         .join(Document)
+#         .where(Document.workspace_id == workspace_id)
+#         .order_by(Chunk.embedding.l2_distance(query_embedding))
+#         .limit(k)
+#     )
+#     return db.scalars(stmt).all()
 
 def get_or_create_workspace(db: Session, workspace_id: str) -> Workspace:
     workspace = db.get(Workspace, workspace_id)

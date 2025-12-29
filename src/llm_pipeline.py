@@ -30,6 +30,8 @@ def build_llm_chain(
 
     if backend == "ollama":
         llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
+
+
     elif backend == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -50,33 +52,18 @@ def build_llm_chain(
             role_prompt
             + "\n\n"
             "Context:\n{context}\n\n"
-            "Question: {question}\n\n"
-            "Instructions:\n"
-            "- Use ONLY the provided context when answering.\n"
-            "- If the context does not contain the answer, respond with:\n"
-            "  \"I do not know based on the provided context.\"\n"
+            "Question:\n{question}\n\n"
+            "Rules:\n"
+            "- Use ONLY the provided context.\n"
+            "- Answer the question as fully as the context allows.\n"
+            "- If some part of the question is not answered by the context, say:\n"
+            "  \"I do not know based on the provided context.\""
         ),
     )
 
     chain = prompt | llm
     print("🔧 Prompt template and chain created successfully.")
     return chain
-
-
-# def retrieve_context(question: str, model, collection, n_results: int = 5):
-#     """
-#     Retrieve relevant text chunks from the Chroma collection.
-#     Returns (context_string, documents_list).
-#     """
-#     query_emb = model.encode([question])
-#     results = collection.query(
-#         query_embeddings=query_emb.tolist(),
-#         n_results=n_results,
-#         include=["documents", "metadatas", "distances"],
-#     )
-#     documents = results["documents"][0]
-#     context = "\n\n---SECTION---\n\n".join(documents)
-#     return context, documents
 
 
 def get_llm_answer(chain, question: str, context: str) -> str:
@@ -105,32 +92,3 @@ def format_response(question: str, answer: str, sources: list) -> str:
         preview = chunk[:100].replace("\n", " ") + "..."
         response += f"{i}. {preview}\n"
     return response
-
-
-# def enhanced_query_with_llm(question: str, model, collection, chain, n_results: int = 5) -> str:
-#     """
-#     Full pipeline (retrieve -> generate -> format). The 'chain' is created by the caller.
-#     """
-#     context, documents = retrieve_context(question, model, collection, n_results)
-#     print("🧩 Retrieved context preview:")
-#     print(context[:500] + "...\n")
-#     answer = get_llm_answer(chain, question, context)
-#     return format_response(question, answer, documents)
-
-
-# if __name__ == "__main__":
-#     # Direct diagnostic run (optional)
-#     from sentence_transformers import SentenceTransformer
-#     import chromadb
-
-#     model = SentenceTransformer("multi-qa-mpnet-base-dot-v1")
-#     client = chromadb.PersistentClient(path="./data/index/chroma_db")
-#     collection = client.get_or_create_collection(name="python_guide")
-
-#     chain = build_llm_chain(
-#         "You are a helpful assistant for a small software project. Answer only based on context."
-#     )
-#     question = "What is a function in Python?"
-#     ctx = "A function is a block of code that performs a specific task when called."
-#     print("🚀 Testing direct LLM invocation...")
-#     print(get_llm_answer(chain, question, ctx))
