@@ -13,6 +13,7 @@ from src.repository import get_top_k_chunks_for_workspace
 from src.models import Workspace, Document, Chunk, Note  # noqa: F401
 
 import re
+from typing import List
 
 _NOISE_PATTERNS = [
     r"^\s*table of contents\b",
@@ -27,147 +28,187 @@ _NOISE_PATTERNS = [
     r"^\s*index\b",
 ]
 
-
-def _extract_focus_terms(text: str) -> list[str]:
+def normalize_query_for_retrieval(question: str) -> str:
     """
-    Extract focus terms from the user question.
-    Universal: derives terms from the question itself (no domain hardcode).
+    Convert a natural language question into a search-like phrase
+    suitable for semantic retrieval.
     """
-    if not text:
-        return []
+    q = question.lower()
 
-    t = text.strip()
+    # remove common instruction words
+    for junk in [
+        "summarize",
+        "based on the provided sources",
+        "based on the sources",
+        "based on sources",
+        "please",
+        "what are",
+        "what is",
+        "give me",
+        "provide",
+        "?",
+    ]:
+        q = q.replace(junk, "")
 
-    terms: set[str] = set()
+    # collapse whitespace
+    q = " ".join(q.split())
 
-    # 1) Latin binomial like "Hypericum perforatum"
-    for m in re.findall(r"\b([A-Z][a-z]+)\s+([a-z]{2,})\b", t):
-        terms.add(f"{m[0]} {m[1]}")
-        terms.add(m[0])
-        terms.add(m[1])
+    return q
 
-    # 2) Anything inside parentheses: "(St. John's Wort)"
-    for p in re.findall(r"\(([^)]+)\)", t):
-        p = p.strip()
-        if len(p) >= 3:
-            terms.add(p)
 
-    # 3) Quoted phrases
-    for q in re.findall(r"\"([^\"]+)\"", t):
-        q = q.strip()
-        if len(q) >= 3:
-            terms.add(q)
+def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
+    """
+    Post-filter chunks by main entity mentioned in the question.
+    Universal: works for plants, places, people, terms.
+    If filtering becomes too aggressive, falls back to original chunks.
+    """
 
-    # 4) Fallback: long words (helps when no binomial)
-    words = re.findall(r"[A-Za-z][A-Za-z'\-]{3,}", t)
-    for w in words:
-        if len(w) >= 5:
-            terms.add(w)
+    q = question.lower()
 
-    # normalize
-    cleaned = []
-    for term in terms:
-        term = term.strip()
-        if term:
-            cleaned.append(term)
+    # very simple entity extraction: longest capitalized phrase OR latin binomial
+    latin_match = re.findall(r"\b[a-z]+ [a-z]+\b", q)
+    entity_terms = set(latin_match)
 
-    return cleaned
+    if not entity_terms:
+        # fallback: meaningful words from question
+        entity_terms = {
+            w for w in re.findall(r"[a-z]{5,}", q)
+            if w not in {"which", "about", "include", "describe", "traditional", "documented"}
+        }
 
-# def _extract_focus_terms(question: str) -> list[str]:
-#     if not question:
-#         return []
+    if not entity_terms:
+        return chunks
 
-#     q = question.strip()
-#     terms: list[str] = []
+    focused = []
+    for ch in chunks:
+        text = (ch.content or "").lower()
+        if any(term in text for term in entity_terms):
+            focused.append(ch)
 
-#     # 1) Quoted phrases: "..." or '...'
-#     for m in re.finditer(r'(["\'])(.+?)\1', q):
-#         phrase = m.group(2).strip()
-#         if len(phrase) >= 3:
-#             terms.append(phrase)
+    # safety fallback
+    if len(focused) < min_keep:
+        return chunks
 
-#     # 2) Parentheses content: ( ... )
-#     for m in re.finditer(r"\(([^)]+)\)", q):
-#         inside = m.group(1).strip()
-#         if len(inside) >= 3:
-#             terms.append(inside)
+    return focused
 
-#     # 3) Latin binomial: Genus species (very common in bio, but harmless elsewhere)
-#     m = re.search(r"\b([A-Z][a-z]{2,})\s+([a-z]{3,})\b", q)
-#     if m:
-#         terms.append(m.group(1))
-#         terms.append(m.group(2))
-#         terms.append(f"{m.group(1)} {m.group(2)}")
+def extract_entity_from_question(question: str) -> str | None:
+    if not question:
+        return None
 
-#     # 4) Tokens that look like identifiers / names / acronyms / versions
-#     #    - CamelCase, ALLCAPS, snake_case, kebab-case, dotted.tokens, v1, 3.2, 2024
-#     token_re = re.compile(
-#         r"\b("
-#         r"[A-Z]{2,}"                          # ALLCAPS
-#         r"|[A-Z][a-z]+(?:[A-Z][a-z]+)+"       # CamelCase
-#         r"|[a-z]+(?:_[a-z0-9]+)+"             # snake_case
-#         r"|[a-z]+(?:-[a-z0-9]+)+"             # kebab-case
-#         r"|[A-Za-z]+(?:\.[A-Za-z0-9]+)+"      # dotted tokens
-#         r"|v?\d+(?:\.\d+)+"                   # versions like 3.2, v1.2
-#         r"|\d{4}"                             # years like 2024
-#         r")\b"
-#     )
-#     for t in token_re.findall(q):
-#         if len(t) >= 2:
-#             terms.append(t)
+    # Try Latin binomial: Genus species
+    m = re.search(r"\b([A-Z][a-z]{2,}\s+[a-z]{2,})\b", question)
+    if m:
+        return m.group(1).lower()
 
-#     # 5) Fallback: unique “meaningful” words (letters only) length>=5
-#     #    No stoplist; just avoids tiny glue-words by length.
-#     for w in re.findall(r"\b[A-Za-z]{5,}\b", q):
-#         terms.append(w)
+    # Fallback: longest meaningful word
+    tokens = re.findall(r"[a-zA-Z]{5,}", question.lower())
+    if not tokens:
+        return None
 
-#     # Deduplicate, keep order, cap to avoid over-filtering
-#     seen = set()
-#     out: list[str] = []
-#     for t in terms:
-#         key = t.lower()
-#         if key not in seen:
-#             seen.add(key)
-#             out.append(t)
+    return max(tokens, key=len)
 
-#     return out[:12]
 
+# def _is_noise_chunk(text: str) -> bool:
+#     if not text:
+#         return True
+
+#     t = text.strip()
+#     if len(t) < 120:
+#         return True
+
+#     lower = t.lower()
+
+#     # Headings/sections to drop
+#     for pat in _NOISE_PATTERNS:
+#         if re.search(pat, lower):
+#             return True
+
+#     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+
+#     # 1) List-like chunks (taxonomic lists, indices, enumerations)
+#     if len(lines) >= 8:
+#         short_lines = sum(1 for ln in lines if len(ln) <= 40)
+#         if short_lines / len(lines) >= 0.6:
+#             return True
+
+#     # 2) Low-sentence / low-language signal:
+#     # if almost no sentence punctuation, it's usually a list/table/metadata.
+#     punct = sum(t.count(ch) for ch in ".?!;:")
+#     if punct <= 1 and len(lines) >= 6:
+#         return True
+
+#     # 3) Excessively "catalog-like": too many commas vs. text
+#     comma_ratio = (t.count(",") / max(1, len(t)))
+#     if comma_ratio > 0.03 and punct <= 2:
+#         return True
+
+#     return False
 
 def _is_noise_chunk(text: str) -> bool:
+    """
+    Conservative, universal noise filter.
+
+    Goal:
+    - Drop obvious boilerplate (TOC/References/Index/etc.)
+    - Drop very short fragments
+    - Drop very list/table-like chunks
+    Without over-filtering normal prose split into many short lines (common after PDF->MD).
+    """
     if not text:
         return True
 
     t = text.strip()
-    if len(t) < 120:  # too short to be useful as evidence
+    if len(t) < 120:
         return True
 
     lower = t.lower()
 
-    # Drop “section header only” chunks.
+    # Obvious section headers / boilerplate
     for pat in _NOISE_PATTERNS:
         if re.search(pat, lower):
             return True
 
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if not lines:
+        return True
+
+    # If the chunk is mostly very short lines AND has weak sentence signal,
+    # it's usually a table, catalog, index, or list.
+    short_lines = sum(1 for ln in lines if len(ln) <= 40)
+    short_ratio = short_lines / max(1, len(lines))
+
+    # Sentence signal (we treat dot as weak because PDF->MD can drop punctuation)
+    punct = sum(t.count(ch) for ch in "?!;:")
+
+    # Digit-heavy catalogs / tables (IDs, measurements, tabular content)
+    digit_ratio = sum(ch.isdigit() for ch in t) / max(1, len(t))
+
+    # Comma-heavy + low punctuation tends to be enumerations / catalog rows
+    comma_ratio = t.count(",") / max(1, len(t))
+
+    # Stronger "table/list" heuristic:
+    # - many short lines (>=70%) OR digit-heavy
+    # - and no clear sentence punctuation
+    if (short_ratio >= 0.70 or digit_ratio >= 0.12) and punct <= 1:
+        return True
+
+    # Another common pattern: comma-separated enumerations with low punctuation
+    if comma_ratio > 0.03 and punct == 0 and len(lines) >= 6:
+        return True
+
     return False
 
 
-TOP_K = int(os.getenv("TOP_K", "10"))
+# TOP_K = int(os.getenv("TOP_K", "10"))
 QUERY_REWRITE_ENABLED = os.getenv("QUERY_REWRITE_ENABLED", "true").lower() == "true"
 QUERY_REWRITE_N = int(os.getenv("QUERY_REWRITE_N", "3"))
-QUERY_REWRITE_TOP_K_PER_QUERY = int(os.getenv("QUERY_REWRITE_TOP_K_PER_QUERY", "5"))
+# QUERY_REWRITE_TOP_K_PER_QUERY = int(os.getenv("QUERY_REWRITE_TOP_K_PER_QUERY", "5"))
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
+QUERY_REWRITE_TOP_K_PER_QUERY = 20
 
-# DEFAULT_ROLE = (
-#     "You are a helpful assistant that answers only based on the provided context. "
-#     "If the context is not enough, say: 'I do not know based on the provided context.'"
-# )
+TOP_K = 20
 
-# SYNTHESIS_ROLE = (
-#     "You are a helpful assistant. Use ONLY the provided context. "
-#     "Synthesize an answer by combining information from multiple context chunks. "
-#     "Do NOT use external knowledge. "
-#     "If the context is insufficient, say: 'I do not know based on the provided context.'"
-# )
+
 DEFAULT_ROLE = (
     "You are a helpful assistant. Answer ONLY using the provided context.\n"
     "If the user asks multiple things, answer the parts that ARE supported by the context.\n"
@@ -175,13 +216,18 @@ DEFAULT_ROLE = (
     "Do NOT use external knowledge.\n"
 )
 
+
 SYNTHESIS_ROLE = (
     "You are a helpful assistant. Use ONLY the provided context.\n"
     "Synthesize an answer by combining information from multiple context chunks.\n"
     "If the user asks multiple things, answer the supported parts and mark missing parts as not found in the provided context.\n"
     "Do NOT use external knowledge.\n"
+    "\n"
+    "Grounding rules:\n"
+    "- Treat each chunk as independent evidence; do not assume facts apply across different entities.\n"
+    "- Include a claim only if it is explicitly stated in at least one chunk.\n"
+    "- If chunks contain information about other entities unrelated to the question, ignore those parts.\n"
 )
-
 
 
 app = FastAPI()
@@ -231,67 +277,266 @@ def _rewrite_queries(question: str) -> list[str]:
         return [question]
 
 
+
+def llm_filter_relevant_chunks(
+    question: str,
+    candidates: list[dict],
+) -> list[dict]:
+    """
+    Ask LLM which chunks are actually relevant to the question.
+    Returns a filtered subset of candidates.
+    """
+
+    if not candidates:
+        return candidates
+
+    # Build a compact list for the LLM
+    items = []
+    for i, c in enumerate(candidates):
+        text = (c.get("content") or "").strip()
+        preview = text[:300].replace("\n", " ")
+        items.append(f"[{i}] {preview}")
+
+    filter_prompt = (
+        "You are given a question and a list of text chunks.\n"
+        "Select ONLY the chunks that contain information directly relevant to the question.\n"
+        "Ignore chunks about other entities, lists, tables, catalogs, or unrelated topics.\n\n"
+        "Return ONLY a comma-separated list of indices (for example: 0,2,3).\n"
+        "If none are relevant, return an empty line.\n\n"
+        f"Question:\n{question}\n\n"
+        "Chunks:\n" + "\n".join(items)
+    )
+
+    try:
+        chain = build_llm_chain(
+            "You are a strict relevance filter. Do not explain anything."
+        )
+        raw = get_llm_answer(chain, filter_prompt, context="")
+
+        indices = [
+            int(x.strip())
+            for x in raw.split(",")
+            if x.strip().isdigit()
+        ]
+
+        return [
+            candidates[i]
+            for i in indices
+            if 0 <= i < len(candidates)
+        ]
+
+    except Exception:
+        # Fail safe: return original candidates
+        return candidates
+
+
+
 def is_multi_question(q: str) -> bool:
     q = q.lower()
     return any(sep in q for sep in [" and ", ",", ";"])
 
 
-
-# def _retrieve_candidates(db: Session, workspace_id: str, questions: list[str], k_per_query: int) -> list[Chunk]:
+# def _retrieve_candidates(
+#     db: Session,
+#     workspace_id: str,
+#     questions: list[str],
+#     k_per_query: int,
+#     # anchor_question: str,
+#     # focus_terms: list[str],
+# ) -> list[Chunk]:
 #     """
 #     Retrieve top chunks for each query and merge results (unique by chunk id).
+
+#     Expects get_top_k_chunks_for_workspace() to return:
+#         list[tuple[Chunk, float]]  # (chunk, distance)
+#     where lower distance => more similar.
+
+#     Attaches a temporary attribute `_distance` to each Chunk for downstream scoring.
 #     """
 #     merged: list[Chunk] = []
 #     seen_ids: set[int] = set()
 
+
 #     for q in questions:
-#         query_chunks = [{"content": q}]
+#         normalized_q = normalize_query_for_retrieval(q)
+#         query_chunks = [{"content": normalized_q}]
 #         query_embeddings, _ = create_embeddings(query_chunks)
 #         query_vector = query_embeddings[0].tolist()
 
-#         chunk_objs = get_top_k_chunks_for_workspace(
+#         print("[DEBUG] q:", q)
+#         print("[DEBUG] type(query_vector):", type(query_vector))
+#         print("[DEBUG] len(query_vector):", len(query_vector) if isinstance(query_vector, list) else "not a list")
+#         print("[DEBUG] first3:", query_vector[:3] if isinstance(query_vector, list) else query_vector)
+
+#         if not isinstance(query_vector, list) or (query_vector and isinstance(query_vector[0], list)) or len(query_vector) != 768:
+#             raise ValueError(f"query_vector is invalid: type={type(query_vector)} len={len(query_vector) if hasattr(query_vector,'__len__') else 'n/a'} sample={str(query_vector)[:120]}")
+
+#         rows = get_top_k_chunks_for_workspace(
+#             db=db,
+#             workspace_id=workspace_id,
+#             query_embedding=query_vector,
+#             # question=q,         
+#             k=k_per_query,    
+#         )
+
+#         for ch, dist in rows:
+#             content = getattr(ch, "content", "") or ""
+#             # if _is_noise_chunk(content):
+#             #     continue
+#             if _is_noise_chunk(content):
+#                 print("[DEBUG] dropped as noise:", (content[:80] or "").replace("\n", " "))
+#                 continue
+
+
+#             setattr(ch, "_distance", dist)
+
+#             ch_id = getattr(ch, "id", None)
+#             if ch_id is None:
+#                 merged.append(ch)
+#                 continue
+
+#             if ch_id not in seen_ids:
+#                 seen_ids.add(ch_id)
+#                 merged.append(ch)
+
+#         # Sort by best (smallest) distance first
+#     merged.sort(key=lambda ch: getattr(ch, "_distance", float("inf")))
+
+#     # Universal rerank: prefer chunks that share meaningful tokens with the question text
+#     # (works across any workspace/topic; no hardcoded entities)
+#     question_text = " ".join(questions).lower()
+
+#     def _tokens(text: str) -> set[str]:
+#         # keep simple: letters/numbers only, length>=4 to avoid noise
+#         cleaned = "".join((c if c.isalnum() else " ") for c in (text or "").lower())
+#         return {t for t in cleaned.split() if len(t) >= 4}
+
+#     q_tokens = _tokens(question_text)
+
+#     def _overlap_score(chunk_text: str) -> int:
+#         c_tokens = _tokens(chunk_text)
+#         # count overlap; cap not needed yet
+#         return len(q_tokens & c_tokens)
+
+#     merged.sort(
+#         key=lambda ch: (
+#             -_overlap_score(getattr(ch, "content", "") or ""),
+#             getattr(ch, "_distance", float("inf")),
+#         )
+#     )
+
+#     TOP_CONTEXT = min(8, len(merged))
+#     return merged[:TOP_CONTEXT]
+
+
+    # merged.sort(key=lambda ch: getattr(ch, "_distance", float("inf")))
+
+    # print("[DEBUG] merged candidates:", len(merged), "top10 distances:", [getattr(ch, "_distance", None) for ch in merged[:10]])
+
+    # return merged
+
+
+# def _retrieve_candidates(
+#     db: Session,
+#     workspace_id: str,
+#     questions: list[str],
+#     k_per_query: int,
+# ) -> list[Chunk]:
+#     """
+#     Minimal, stable retrieval:
+#     - semantic top-k via pgvector
+#     - noise filtering (tables, catalogs, lists)
+#     - strict context cap
+#     NO rerank, NO heuristics
+#     """
+
+#     merged: list[Chunk] = []
+#     seen_ids: set[int] = set()
+
+#     for q in questions:
+#         normalized_q = normalize_query_for_retrieval(q)
+
+#         query_embeddings, _ = create_embeddings([{"content": normalized_q}])
+#         query_vector = query_embeddings[0].tolist()
+
+#         rows = get_top_k_chunks_for_workspace(
 #             db=db,
 #             workspace_id=workspace_id,
 #             query_embedding=query_vector,
 #             k=k_per_query,
 #         )
 
-#         for ch in chunk_objs:
-#             if _is_noise_chunk(getattr(ch, "content", "") or ""):
+#         for ch, dist in rows:
+#             content = ch.content or ""
+
+#             # hard noise filter (tables / lists / catalogs)
+#             if _is_noise_chunk(content):
 #                 continue
 
-#             ch_id = getattr(ch, "id", None)
-#             if ch_id is None:
-#                 merged.append(ch)
+#             ch_id = ch.id
+#             if ch_id in seen_ids:
 #                 continue
-#             if ch_id not in seen_ids:
-#                 seen_ids.add(ch_id)
-#                 merged.append(ch)
 
-#     return merged
+#             setattr(ch, "_distance", float(dist))
+#             seen_ids.add(ch_id)
+#             merged.append(ch)
+
+#     # pure semantic order
+#     merged.sort(key=lambda ch: ch._distance)
+
+#     # Precision: diversify by document (universal, no hardcoding)
+#     PER_DOC_LIMIT = 2
+#     by_doc: dict[int, int] = {}
+#     diversified: list[Chunk] = []
+#     for ch in merged:
+#         doc_id = getattr(ch, "document_id", None)
+#         if doc_id is None:
+#             continue
+#         used = by_doc.get(doc_id, 0)
+#         if used >= PER_DOC_LIMIT:
+#             continue
+#         by_doc[doc_id] = used + 1
+#         diversified.append(ch)
+#     merged = diversified
+
+#     # hard context limit
+#     CONTEXT_K = 8
+#         # DEBUG: what we actually send to LLM
+#     selected = merged[:CONTEXT_K]
+#     print("=== CONTEXT DEBUG ===")
+#     print("selected count:", len(selected))
+#     print("selected distances:", [round(getattr(ch, "_distance", 999.0), 4) for ch in selected])
+#     print("selected sources:", [getattr(getattr(ch, "document", None), "source", None) for ch in selected])
+#     print("=====================")
+
+#     return selected
+
 def _retrieve_candidates(
     db: Session,
     workspace_id: str,
     questions: list[str],
     k_per_query: int,
-    # focus_terms: list[str],
 ) -> list[Chunk]:
     """
-    Retrieve top chunks for each query and merge results (unique by chunk id).
-
-    Expects get_top_k_chunks_for_workspace() to return:
-        list[tuple[Chunk, float]]  # (chunk, distance)
-    where lower distance => more similar.
-
-    Attaches a temporary attribute `_distance` to each Chunk for downstream scoring.
+    Minimal retrieval + HARD DEBUG:
+    shows how many rows are dropped as noise vs duplicates.
     """
+
     merged: list[Chunk] = []
     seen_ids: set[int] = set()
 
+    total_rows = 0
+    dropped_noise = 0
+    dropped_dupe = 0
+    kept = 0
+
+    noise_samples = 0
+    dupe_samples = 0
 
     for q in questions:
-        query_chunks = [{"content": q}]
-        query_embeddings, _ = create_embeddings(query_chunks)
+        normalized_q = normalize_query_for_retrieval(q)
+
+        query_embeddings, _ = create_embeddings([{"content": normalized_q}])
         query_vector = query_embeddings[0].tolist()
 
         rows = get_top_k_chunks_for_workspace(
@@ -301,25 +546,58 @@ def _retrieve_candidates(
             k=k_per_query,
         )
 
+        total_rows += len(rows)
+
         for ch, dist in rows:
-            content = getattr(ch, "content", "") or ""
+            content = (ch.content or "")
+
+            # 1) noise
             if _is_noise_chunk(content):
+                dropped_noise += 1
+                if noise_samples < 5:
+                    noise_samples += 1
+                    src = getattr(getattr(ch, "document", None), "source", None)
+                    preview = content[:120].replace("\n", " ")
+                    print(f"[DROP:NOISE] dist={float(dist):.4f} source={src} preview={preview}")
                 continue
 
-            setattr(ch, "_distance", dist)
-
+            # 2) duplicates
             ch_id = getattr(ch, "id", None)
-            if ch_id is None:
-                merged.append(ch)
+            if ch_id is not None and ch_id in seen_ids:
+                dropped_dupe += 1
+                if dupe_samples < 5:
+                    dupe_samples += 1
+                    src = getattr(getattr(ch, "document", None), "source", None)
+                    preview = content[:120].replace("\n", " ")
+                    print(f"[DROP:DUPE]  dist={float(dist):.4f} source={src} preview={preview}")
                 continue
 
-            if ch_id not in seen_ids:
+            # keep
+            if ch_id is not None:
                 seen_ids.add(ch_id)
-                merged.append(ch)
 
-        # Sort by best (smallest) distance first
-    merged.sort(key=lambda ch: getattr(ch, "_distance", float("inf")))
-    return merged
+            setattr(ch, "_distance", float(dist))
+            merged.append(ch)
+            kept += 1
+
+    merged.sort(key=lambda ch: getattr(ch, "_distance", 999.0))
+
+    CONTEXT_K = 8
+    selected = merged[:CONTEXT_K]
+
+    print("=== RETRIEVAL SUMMARY ===")
+    print("total_rows:", total_rows)
+    print("dropped_noise:", dropped_noise)
+    print("dropped_dupe:", dropped_dupe)
+    print("kept_after_filters:", kept)
+    print("selected_for_context:", len(selected))
+    if selected:
+        print("selected distances:", [round(getattr(ch, "_distance", 0.0), 4) for ch in selected])
+        print("selected sources:", [getattr(ch.document, "source", None) for ch in selected])
+    print("=========================")
+
+    return selected
+
 
 
 
@@ -486,8 +764,22 @@ def list_notes(workspace_id: str):
 def chat(request: ChatRequest):
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
+    mode = (request.mode or "reference").strip().lower()
 
-    search_queries = _rewrite_queries(request.question)
+    # Retrieval queries:
+    if mode == "synthesis":
+        # For synthesis: do NOT rewrite away the entity name.
+        search_queries = [request.question]
+    else:
+        # For reference/custom: rewrite if enabled, but never allow empty output.
+        search_queries = _rewrite_queries(request.question)
+        if not search_queries:
+            search_queries = [request.question]
+
+    # search_queries = ["Hypericum perforatum"] if mode == "synthesis" else _rewrite_queries(request.question)
+    print("🚨 Search Queries: 🚨")
+    print(search_queries)
+    print("🚨 Search Queries: 🚨")
 
 
     db = SessionLocal()
@@ -497,11 +789,16 @@ def chat(request: ChatRequest):
             workspace_id=request.workspace_id,
             questions=search_queries,
             k_per_query=QUERY_REWRITE_TOP_K_PER_QUERY if (QUERY_REWRITE_ENABLED and LLM_ENABLED) else TOP_K,
+            # anchor_question=request.question,
         )
 
+        chunk_objs = focus_by_entity(chunk_objs, request.question)
+
         # Hard cap total candidates to TOP_K (keep first ones).
-        chunk_objs = sorted(chunk_objs, key=lambda ch: getattr(ch, "_distance", 999.0))
-        chunk_objs = chunk_objs[:TOP_K]
+        # chunk_objs = sorted(chunk_objs, key=lambda ch: getattr(ch, "_distance", 999.0))
+        # chunk_objs = chunk_objs[:TOP_K]
+        CONTEXT_K = 8
+        chunk_objs = chunk_objs[:CONTEXT_K]
 
 
         candidates = [
@@ -515,7 +812,15 @@ def chat(request: ChatRequest):
             }
             for chunk in chunk_objs
         ]
+
+        candidates = llm_filter_relevant_chunks(
+            request.question,
+            candidates,
+        )
+
+
         stored_records = len(candidates)
+
     finally:
         db.close()
 
@@ -523,19 +828,7 @@ def chat(request: ChatRequest):
     if stored_records == 0:
         answer = "This is a stub answer."
     else:
-        # question_lower = request.question.lower()
-        # context_parts = [
-        #     c["content"]
-        #     for c in candidates
-        #     if c["content"] and any(
-        #         token in c["content"].lower()
-        #         for token in question_lower.split()
-        #         if len(token) > 4
-        #     )
-        # ]
-
-        # if not context_parts:
-        #     context_parts = [c["content"] for c in candidates if c["content"]]
+      
         context_parts = [c["content"] for c in candidates if c["content"]]
         context = "\n\n---\n\n".join(context_parts)
 
@@ -546,8 +839,7 @@ def chat(request: ChatRequest):
         if not LLM_ENABLED:
             answer = "LLM is temporarily disabled. Please try again later."
         else:
-            mode = (request.mode or "reference").strip().lower()
-
+       
             if mode == "reference":
                 q = request.question.lower()
                 if " and " in q or "," in q or ";" in q:
