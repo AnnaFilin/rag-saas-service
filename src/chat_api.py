@@ -236,18 +236,167 @@ def list_notes(workspace_id: str):
         db.close()
 
 
+# @app.post("/chat")
+# def chat(request: ChatRequest):
+#     llm_backend = os.getenv("LLM_BACKEND", "ollama")
+#     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
+#     mode = (request.mode or "reference").strip().lower()
+
+#     # Retrieval queries:
+#     if mode == "synthesis":
+#         # For synthesis: do NOT rewrite away the entity name.
+#         search_queries = [request.question]
+#     else:
+#         # For reference/custom: rewrite if enabled, but never allow empty output.
+#         search_queries = _rewrite_queries(
+#             request.question,
+#             llm_enabled=LLM_ENABLED,
+#             query_rewrite_enabled=QUERY_REWRITE_ENABLED,
+#             query_rewrite_n=QUERY_REWRITE_N,
+#             build_llm_chain=build_llm_chain,
+#             get_llm_answer=get_llm_answer,
+#         )
+#         if not search_queries:
+#             search_queries = [request.question]
+
+#     print("🚨 Search Queries: 🚨")
+#     print(search_queries)
+#     print("🚨 Search Queries: 🚨")
+
+#     db = SessionLocal()
+#     try:
+#         chunk_objs = _retrieve_candidates(
+#             db=db,
+#             workspace_id=request.workspace_id,
+#             questions=search_queries,
+#             k_per_query=TOP_K,
+#             create_embeddings=create_embeddings,
+#             get_top_k_chunks_for_workspace=get_top_k_chunks_for_workspace,
+#             get_top_k_chunks_fts=get_top_k_chunks_fts,
+#         )
+
+
+#         chunk_objs = focus_by_entity(chunk_objs, request.question)
+
+#         CONTEXT_K = 8
+#         chunk_objs = chunk_objs[:CONTEXT_K]
+
+#         candidates = [
+#             {
+#                 "chunk_id": getattr(chunk, "id", None),
+#                 "document_id": getattr(chunk, "document_id", None),
+#                 "chunk_index": getattr(chunk, "index", None),
+#                 "content": chunk.content,
+#                 "source": getattr(chunk.document, "source", None),
+#                 "score": getattr(chunk, "_distance", None),
+#             }
+#             for chunk in chunk_objs
+#         ]
+
+#         candidates = llm_filter_relevant_chunks(
+#             request.question,
+#             candidates,
+#             build_llm_chain=build_llm_chain,
+#             get_llm_answer=get_llm_answer,
+#         )
+
+#         stored_records = len(candidates)
+#     finally:
+#         db.close()
+
+#     if stored_records == 0:
+#         answer = "This is a stub answer."
+#     else:
+#         context_parts = [c["content"] for c in candidates if c["content"]]
+#         context = "\n\n---\n\n".join(context_parts)
+
+#         print("🚨 Context: 🚨")
+#         print(context)
+#         print("🚨 Context: 🚨")
+
+#         if not LLM_ENABLED:
+#             answer = "LLM is temporarily disabled. Please try again later."
+#         else:
+#             if mode == "reference":
+#                 q = request.question.lower()
+#                 if " and " in q or "," in q or ";" in q:
+#                     return ChatResponse(
+#                         workspace_id=request.workspace_id,
+#                         question=request.question,
+#                         role=request.role,
+#                         answer=(
+#                             "Reference mode supports only ONE atomic question. "
+#                             "Please split your question or use synthesis mode."
+#                         ),
+#                         sources=[],
+#                         stored_records=0,
+#                         candidates=[],
+#                         llm_backend=llm_backend,
+#                         llm_model=llm_model,
+#                         mode=mode,
+#                     )
+
+#             if mode == "synthesis":
+#                 effective_role = SYNTHESIS_ROLE
+#             elif mode == "custom":
+#                 effective_role = (
+#                     request.role.strip()
+#                     if request.role and request.role.strip()
+#                     else DEFAULT_ROLE
+#                 )
+#             else:  # reference
+#                 effective_role = DEFAULT_ROLE
+
+#             print("🚨 LLM WILL BE CALLED 🚨")
+
+#             chain = build_llm_chain(effective_role)
+#             answer = get_llm_answer(chain, request.question, context)
+
+#     sources = [
+#         {
+#             "chunk_id": candidate.get("chunk_id"),
+#             "document_id": candidate.get("document_id"),
+#             "chunk_index": candidate.get("chunk_index"),
+#             "content": candidate.get("content"),
+#             "source": candidate.get("source"),
+#             "score": candidate.get("score"),
+#         }
+#         for candidate in candidates
+#     ]
+
+#     return ChatResponse(
+#         workspace_id=request.workspace_id,
+#         question=request.question,
+#         role=request.role,
+#         answer=answer,
+#         sources=sources,
+#         stored_records=stored_records,
+#         candidates=candidates,
+#         llm_backend=llm_backend,
+#         llm_model=llm_model,
+#         mode=request.mode,
+#     )
+
 @app.post("/chat")
 def chat(request: ChatRequest):
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
     mode = (request.mode or "reference").strip().lower()
 
-    # Retrieval queries:
-    if mode == "synthesis":
-        # For synthesis: do NOT rewrite away the entity name.
+    # =========================
+    # 1. Build search queries (MODE-DEPENDENT)
+    # =========================
+
+    if mode in ("reference", "synthesis"):
+        # STRICT modes:
+        # - no rewrite
+        # - no expansion
+        # - one question = one retrieval intent
         search_queries = [request.question]
-    else:
-        # For reference/custom: rewrite if enabled, but never allow empty output.
+
+    elif mode == "custom":
+        # Exploratory / power-user mode:
+        # rewrite is allowed
         search_queries = _rewrite_queries(
             request.question,
             llm_enabled=LLM_ENABLED,
@@ -259,9 +408,17 @@ def chat(request: ChatRequest):
         if not search_queries:
             search_queries = [request.question]
 
+    else:
+        # Safety fallback
+        search_queries = [request.question]
+
     print("🚨 Search Queries: 🚨")
     print(search_queries)
     print("🚨 Search Queries: 🚨")
+
+    # =========================
+    # 2. Retrieval
+    # =========================
 
     db = SessionLocal()
     try:
@@ -275,7 +432,7 @@ def chat(request: ChatRequest):
             get_top_k_chunks_fts=get_top_k_chunks_fts,
         )
 
-
+        # Entity focus is OK for all modes
         chunk_objs = focus_by_entity(chunk_objs, request.question)
 
         CONTEXT_K = 8
@@ -293,6 +450,8 @@ def chat(request: ChatRequest):
             for chunk in chunk_objs
         ]
 
+        # LLM relevance filter is OK for synthesis/custom
+        # For reference it is conservative but acceptable
         candidates = llm_filter_relevant_chunks(
             request.question,
             candidates,
@@ -301,22 +460,29 @@ def chat(request: ChatRequest):
         )
 
         stored_records = len(candidates)
+
     finally:
         db.close()
 
+    # =========================
+    # 3. Empty result handling
+    # =========================
+
     if stored_records == 0:
-        answer = "This is a stub answer."
+        answer = "This information is not found in the provided sources."
+
     else:
         context_parts = [c["content"] for c in candidates if c["content"]]
         context = "\n\n---\n\n".join(context_parts)
 
-        print("🚨 Context: 🚨")
-        print(context)
-        print("🚨 Context: 🚨")
-
         if not LLM_ENABLED:
             answer = "LLM is temporarily disabled. Please try again later."
+
         else:
+            # =========================
+            # 4. Mode-specific answering
+            # =========================
+
             if mode == "reference":
                 q = request.question.lower()
                 if " and " in q or "," in q or ";" in q:
@@ -335,22 +501,29 @@ def chat(request: ChatRequest):
                         llm_model=llm_model,
                         mode=mode,
                     )
+                effective_role = DEFAULT_ROLE
 
-            if mode == "synthesis":
+            elif mode == "synthesis":
                 effective_role = SYNTHESIS_ROLE
+
             elif mode == "custom":
                 effective_role = (
                     request.role.strip()
                     if request.role and request.role.strip()
                     else DEFAULT_ROLE
                 )
-            else:  # reference
+
+            else:
                 effective_role = DEFAULT_ROLE
 
             print("🚨 LLM WILL BE CALLED 🚨")
 
             chain = build_llm_chain(effective_role)
             answer = get_llm_answer(chain, request.question, context)
+
+    # =========================
+    # 5. Response
+    # =========================
 
     sources = [
         {
@@ -376,6 +549,7 @@ def chat(request: ChatRequest):
         llm_model=llm_model,
         mode=request.mode,
     )
+
 
 
 @app.get("/documents")
