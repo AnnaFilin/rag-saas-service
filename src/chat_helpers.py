@@ -1,0 +1,327 @@
+# =========================
+# (all helper functions, no FastAPI app / endpoints)
+# =========================
+
+import os
+import re
+from typing import Any, List, Sequence
+
+DEBUG_LOGS = os.getenv("DEBUG_LOGS", "0") == "1"
+
+
+def _dbg(*args):
+    if DEBUG_LOGS:
+        print(*args)
+
+
+_NOISE_PATTERNS = [
+    r"^\s*table of contents\b",
+    r"^\s*contents\b",
+    r"^\s*introduction\b",
+    r"^\s*abstract\b",
+    r"^\s*references\b",
+    r"^\s*bibliography\b",
+    r"^\s*literature\b",
+    r"^\s*acknowledg(e)?ments\b",
+    r"^\s*appendix\b",
+    r"^\s*index\b",
+]
+
+
+def normalize_query_for_retrieval(question: str) -> str:
+    """
+    Convert a natural language question into a search-like phrase
+    suitable for semantic retrieval.
+    """
+    q = question.lower()
+
+    for junk in [
+        "summarize",
+        "based on the provided sources",
+        "based on the sources",
+        "based on sources",
+        "please",
+        "what are",
+        "what is",
+        "give me",
+        "provide",
+        "?",
+    ]:
+        q = q.replace(junk, "")
+
+    q = " ".join(q.split())
+    return q
+
+
+def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
+    """
+    Post-filter chunks by main entity mentioned in the question.
+    Universal: works for plants, places, people, terms.
+    If filtering becomes too aggressive, falls back to original chunks.
+    """
+    q = question.lower()
+
+    latin_match = re.findall(r"\b[a-z]+ [a-z]+\b", q)
+    entity_terms = set(latin_match)
+
+    if not entity_terms:
+        entity_terms = {
+            w
+            for w in re.findall(r"[a-z]{5,}", q)
+            if w
+            not in {"which", "about", "include", "describe", "traditional", "documented"}
+        }
+
+    if not entity_terms:
+        return chunks
+
+    focused = []
+    for ch in chunks:
+        text = (ch.content or "").lower()
+        if any(term in text for term in entity_terms):
+            focused.append(ch)
+
+    if len(focused) < min_keep:
+        return chunks
+
+    return focused
+
+
+def _is_noise_chunk(text: str) -> bool:
+    """
+    Conservative, universal noise filter.
+    """
+    if not text:
+        return True
+
+    t = text.strip()
+    if len(t) < 120:
+        return True
+
+    lower = t.lower()
+
+    for pat in _NOISE_PATTERNS:
+        if re.search(pat, lower):
+            return True
+
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if not lines:
+        return True
+
+    short_lines = sum(1 for ln in lines if len(ln) <= 40)
+    short_ratio = short_lines / max(1, len(lines))
+
+    punct = sum(t.count(ch) for ch in "?!;:")
+    digit_ratio = sum(ch.isdigit() for ch in t) / max(1, len(t))
+    comma_ratio = t.count(",") / max(1, len(t))
+
+    if (short_ratio >= 0.70 or digit_ratio >= 0.12) and punct <= 1:
+        return True
+
+    if comma_ratio > 0.03 and punct == 0 and len(lines) >= 6:
+        return True
+
+    return False
+
+
+def _rewrite_queries(
+    question: str,
+    *,
+    llm_enabled: bool,
+    query_rewrite_enabled: bool,
+    query_rewrite_n: int,
+    build_llm_chain: Any,
+    get_llm_answer: Any,
+) -> list[str]:
+    """
+    Generate alternative search queries for better retrieval.
+    """
+    if not llm_enabled or not query_rewrite_enabled:
+        return [question]
+
+    rewrite_role = (
+        "You rewrite a user's question into short search queries for semantic retrieval.\n"
+        "Return 3 alternative queries (one per line), no numbering, no extra text.\n"
+        "Use synonyms and related phrases that may appear in books.\n"
+        "Do NOT answer the question."
+    )
+
+    try:
+        chain = build_llm_chain(rewrite_role)
+        raw = get_llm_answer(chain, question, context="")
+        lines = [line.strip(" -\t\r\n") for line in raw.splitlines() if line.strip()]
+
+        queries = []
+        for q in lines:
+            if q and q.lower() != question.lower():
+                queries.append(q)
+
+        merged = [question] + queries
+
+        seen = set()
+        out = []
+        for q in merged:
+            key = q.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(q)
+
+        return out[: max(1, query_rewrite_n + 1)]
+    except Exception:
+        return [question]
+
+
+def llm_filter_relevant_chunks(
+    question: str,
+    candidates: list[dict],
+    *,
+    build_llm_chain: Any,
+    get_llm_answer: Any,
+) -> list[dict]:
+    """
+    Ask LLM which chunks are actually relevant to the question.
+    """
+    if not candidates:
+        return candidates
+
+    items = []
+    for i, c in enumerate(candidates):
+        text = (c.get("content") or "").strip()
+        preview = text[:300].replace("\n", " ")
+        items.append(f"[{i}] {preview}")
+
+    filter_prompt = (
+        "You are given a question and a list of text chunks.\n"
+        "Select ONLY the chunks that contain information directly relevant to the question.\n"
+        "Ignore chunks about other entities, lists, tables, catalogs, or unrelated topics.\n\n"
+        "Return ONLY a comma-separated list of indices (for example: 0,2,3).\n"
+        "If none are relevant, return an empty line.\n\n"
+        f"Question:\n{question}\n\n"
+        "Chunks:\n" + "\n".join(items)
+    )
+
+    try:
+        chain = build_llm_chain("You are a strict relevance filter. Do not explain anything.")
+        raw = get_llm_answer(chain, filter_prompt, context="")
+        indices = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+        return [candidates[i] for i in indices if 0 <= i < len(candidates)]
+    except Exception:
+        return candidates
+
+
+def _retrieve_candidates(
+    db: Any,
+    workspace_id: str,
+    questions: Sequence[str],
+    k_per_query: int,
+    *,
+    create_embeddings: Any,
+    get_top_k_chunks_for_workspace: Any,
+    get_top_k_chunks_fts: Any,
+) -> list[Any]:
+    """
+    Retrieval with RRF fusion.
+    """
+
+    merged: list[Any] = []
+    seen_ids: set[int] = set()
+
+    total_rows = 0
+    dropped_noise = 0
+    dropped_dupe = 0
+    kept = 0
+
+    noise_samples = 0
+    dupe_samples = 0
+
+    for q in questions:
+        normalized_q = normalize_query_for_retrieval(q)
+
+        query_embeddings, _ = create_embeddings([{"content": normalized_q}])
+        query_vector = query_embeddings[0].tolist()
+
+        vector_rows = get_top_k_chunks_for_workspace(
+            db=db,
+            workspace_id=workspace_id,
+            query_embedding=query_vector,
+            k=k_per_query,
+        )
+
+        fts_rows = get_top_k_chunks_fts(
+            db=db,
+            workspace_id=workspace_id,
+            query_text=normalized_q,
+            k=50,
+        )
+
+        RRF_K = 60
+        scores: dict[int, float] = {}
+        chunk_by_id: dict[int, Any] = {}
+        dist_by_id: dict[int, float] = {}
+
+        for rank, (ch, dist) in enumerate(vector_rows, start=1):
+            cid = int(getattr(ch, "id"))
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+            chunk_by_id[cid] = ch
+            dist_by_id[cid] = float(dist)
+
+        for rank, (ch, dist) in enumerate(fts_rows, start=1):
+            cid = int(getattr(ch, "id"))
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+            chunk_by_id[cid] = ch
+            dist_by_id[cid] = min(dist_by_id.get(cid, 999.0), float(dist))
+
+        rows = [
+            (chunk_by_id[cid], dist_by_id.get(cid, 999.0), float(scores[cid]))
+            for cid in scores.keys()
+        ]
+        rows.sort(key=lambda t: t[2], reverse=True)
+
+        total_rows += len(rows)
+
+        for ch, dist, rrf_score in rows:
+            content = (ch.content or "")
+
+            if _is_noise_chunk(content):
+                dropped_noise += 1
+                if noise_samples < 5:
+                    noise_samples += 1
+                    src = getattr(getattr(ch, "document", None), "source", None)
+                    _dbg(f"[DROP:NOISE] dist={float(dist):.4f} source={src}")
+                continue
+
+            ch_id = getattr(ch, "id", None)
+            if ch_id is not None and int(ch_id) in seen_ids:
+                dropped_dupe += 1
+                if dupe_samples < 5:
+                    dupe_samples += 1
+                    src = getattr(getattr(ch, "document", None), "source", None)
+                    _dbg(f"[DROP:DUPE] dist={float(dist):.4f} source={src}")
+                continue
+
+            if ch_id is not None:
+                seen_ids.add(int(ch_id))
+
+            setattr(ch, "_distance", float(dist))
+            setattr(ch, "_rrf", float(rrf_score))
+            merged.append(ch)
+            kept += 1
+
+    merged.sort(key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0)))
+
+    CONTEXT_K = 8
+    selected = merged[:CONTEXT_K]
+
+    _dbg("=== RETRIEVAL SUMMARY ===")
+    _dbg("total_rows:", total_rows)
+    _dbg("dropped_noise:", dropped_noise)
+    _dbg("dropped_dupe:", dropped_dupe)
+    _dbg("kept_after_filters:", kept)
+    _dbg("selected_for_context:", len(selected))
+    if selected:
+        _dbg("selected rrf:", [round(getattr(ch, "_rrf", 0.0), 6) for ch in selected])
+        _dbg("selected distances:", [round(getattr(ch, "_distance", 0.0), 4) for ch in selected])
+        _dbg("selected sources:", [getattr(ch.document, "source", None) for ch in selected])
+    _dbg("=========================")
+
+    return selected
