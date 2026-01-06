@@ -9,29 +9,18 @@ from langchain_ollama import OllamaLLM
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
-
 def build_llm_chain(
     role_prompt: str,
     model_name: str = "llama3.2:latest",
     temperature: float = 0.1,
+    append_default_rules: bool = True,
 ):
-    """
-    Factory: build and return a ready-to-use LangChain 'chain' (Prompt -> LLM).
-    Must be called in the same process where .invoke() will run.
-    """
     backend = os.getenv("LLM_BACKEND", "ollama").lower()
     configured_model = os.getenv("LLM_MODEL", model_name)
     configured_temperature = float(os.getenv("LLM_TEMPERATURE", temperature))
 
-    print(
-        f"🔧 Initializing LLM backend={backend} model={configured_model} "
-        f"temperature={configured_temperature}"
-    )
-
     if backend == "ollama":
         llm = OllamaLLM(model=configured_model, temperature=configured_temperature)
-
-
     elif backend == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -42,28 +31,32 @@ def build_llm_chain(
             openai_api_key=api_key,
         )
     else:
-        raise ValueError(
-            'Unsupported LLM_BACKEND; only "ollama" and "openai" are implemented.'
-        )
+        raise ValueError('Unsupported LLM_BACKEND; only "ollama" and "openai" are implemented.')
 
-    prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template=(
-            role_prompt
-            + "\n\n"
-            "Context:\n{context}\n\n"
-            "Question:\n{question}\n\n"
+    base_template = (
+        role_prompt
+        + "\n\n"
+        "Context:\n{context}\n\n"
+        "Question:\n{question}\n\n"
+    )
+
+    if append_default_rules:
+        base_template += (
             "Rules:\n"
             "- Use ONLY the provided context.\n"
             "- Answer the question as fully as the context allows.\n"
             "- If some part of the question is not answered by the context, say:\n"
             "  \"I do not know based on the provided context.\""
-        ),
+        )
+
+    prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template=base_template,
     )
 
-    chain = prompt | llm
-    print("🔧 Prompt template and chain created successfully.")
-    return chain
+    return prompt | llm
+
+
 
 
 def get_llm_answer(chain, question: str, context: str) -> str:

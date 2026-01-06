@@ -3,6 +3,7 @@
 # =========================
 
 import os
+import math
 import re
 from typing import Any, List, Sequence
 
@@ -26,6 +27,62 @@ _NOISE_PATTERNS = [
     r"^\s*appendix\b",
     r"^\s*index\b",
 ]
+
+_REF_LIKE_RE = re.compile(
+    r"\b(19\d{2}|20\d{2}|vol\.|no\.|pp\.|ed\.|doi|isbn|issn|journal|proceedings|"
+    r"phytochemistry|university|press|thesis|m\.sc|b\.sc)\b",
+    re.IGNORECASE,
+)
+
+def _fact_density_score(text: str) -> float:
+    """
+    Universal heuristic: prefer prose-like, claim-bearing chunks.
+    Penalize bibliography/list/table-like chunks.
+    No domain keywords.
+    """
+    if not text:
+        return -1e9
+
+    t = text.strip()
+    if len(t) < 120:
+        return -1e9
+
+    n = len(t)
+    letters = sum(ch.isalpha() for ch in t)
+    digits = sum(ch.isdigit() for ch in t)
+    spaces = sum(ch.isspace() for ch in t)
+
+    letters_ratio = letters / max(1, n)
+    digits_ratio = digits / max(1, n)
+
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    line_count = len(lines)
+    short_lines = sum(1 for ln in lines if len(ln) <= 40)
+    short_line_ratio = short_lines / max(1, line_count)
+
+    punct = sum(t.count(ch) for ch in ".?!;:")
+    comma_ratio = t.count(",") / max(1, n)
+
+    ref_like_hits = 0
+    if _REF_LIKE_RE.search(t):
+        ref_like_hits += 1
+    if "http://" in t or "https://" in t:
+        ref_like_hits += 1
+    if "(" in t and ")" in t:
+        ref_like_hits += 1
+
+    # Score: prose/claims up, lists/refs down
+    score = 0.0
+    score += 2.5 * letters_ratio
+    score += 0.6 * math.log1p(punct)          # sentences signal
+    score -= 2.0 * digits_ratio               # catalog-like
+    score -= 1.2 * short_line_ratio           # table/list-like
+    score -= 0.8 * comma_ratio                # heavy enumerations
+    score -= 1.5 * ref_like_hits              # bibliography/reference-like
+    score += 0.2 * math.log1p(n)              # slightly prefer longer chunks
+
+    return score
+
 
 
 def normalize_query_for_retrieval(question: str) -> str:
@@ -171,6 +228,7 @@ def _rewrite_queries(
         return [question]
 
 
+
 def llm_filter_relevant_chunks(
     question: str,
     candidates: list[dict],
@@ -179,10 +237,17 @@ def llm_filter_relevant_chunks(
     get_llm_answer: Any,
 ) -> list[dict]:
     """
-    Ask LLM which chunks are actually relevant to the question.
+    LLM-assisted relevance selection (SOFT):
+    - Keep a base set of top candidates always
+    - Optionally add LLM-picked items
+    - Never drop the base set
     """
     if not candidates:
         return candidates
+
+    # Base context that must always survive (universal invariant)
+    min_keep = max(3, len(candidates) // 3)
+    base = candidates[:min_keep]
 
     items = []
     for i, c in enumerate(candidates):
@@ -193,20 +258,45 @@ def llm_filter_relevant_chunks(
     filter_prompt = (
         "You are given a question and a list of text chunks.\n"
         "Select ONLY the chunks that contain information directly relevant to the question.\n"
-        "Ignore chunks about other entities, lists, tables, catalogs, or unrelated topics.\n\n"
-        "Return ONLY a comma-separated list of indices (for example: 0,2,3).\n"
-        "If none are relevant, return an empty line.\n\n"
+        "Return ONLY indices as comma-separated integers, like: 0,2,3\n"
+        "If none are relevant, return: -1\n\n"
         f"Question:\n{question}\n\n"
         "Chunks:\n" + "\n".join(items)
     )
 
     try:
-        chain = build_llm_chain("You are a strict relevance filter. Do not explain anything.")
+        chain = build_llm_chain(
+            "You are a strict relevance filter.\n"
+            "Output ONLY comma-separated integers (e.g., 0,2,3) or -1.\n"
+            "No extra words."
+        )
+
         raw = get_llm_answer(chain, filter_prompt, context="")
-        indices = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
-        return [candidates[i] for i in indices if 0 <= i < len(candidates)]
+        raw = (raw or "").strip()
+
+        import re
+        nums = [int(x) for x in re.findall(r"-?\d+", raw)]
+
+        picked = []
+        if not (nums == [-1] or len(nums) == 0):
+            picked = [candidates[i] for i in nums if 0 <= i < len(candidates)]
+
+        # Merge base + picked, dedupe by chunk_id, preserve original order
+        seen = set()
+        merged = []
+        for c in (base + picked):
+            cid = c.get("chunk_id")
+            key = cid if cid is not None else id(c)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(c)
+
+        return merged
+
     except Exception:
         return candidates
+
 
 
 def _retrieve_candidates(
