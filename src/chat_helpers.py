@@ -14,20 +14,6 @@ def _dbg(*args):
         print(*args)
 
 
-_NOISE_PATTERNS = [
-    r"^\s*table of contents\b",
-    r"^\s*contents\b",
-    r"^\s*introduction\b",
-    r"^\s*abstract\b",
-    r"^\s*references\b",
-    r"^\s*bibliography\b",
-    r"^\s*literature\b",
-    r"^\s*acknowledg(e)?ments\b",
-    r"^\s*appendix\b",
-    r"^\s*index\b",
-]
-
-
 def normalize_query_for_retrieval(question: str) -> str:
     """
     Convert a natural language question into a search-like phrase
@@ -80,77 +66,6 @@ def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
 
     return focused
 
-
-
-# def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
-#     """
-#     Post-filter chunks by main entity mentioned in the question.
-#     Universal: works for plants, places, people, terms.
-#     If filtering becomes too aggressive, falls back to original chunks.
-#     """
-#     q = question.lower()
-
-#     latin_match = re.findall(r"\b[a-z]+ [a-z]+\b", q)
-#     entity_terms = set(latin_match)
-
-#     if not entity_terms:
-#         entity_terms = {
-#             w
-#             for w in re.findall(r"[a-z]{5,}", q)
-#             if w
-#             not in {"which", "about", "include", "describe", "traditional", "documented"}
-#         }
-
-#     if not entity_terms:
-#         return chunks
-
-#     focused = []
-#     for ch in chunks:
-#         text = (ch.content or "").lower()
-#         if any(term in text for term in entity_terms):
-#             focused.append(ch)
-
-#     if len(focused) < min_keep:
-#         return chunks
-
-#     return focused
-
-
-# def _is_noise_chunk(text: str) -> bool:
-#     """
-#     Conservative, universal noise filter.
-#     """
-#     if not text:
-#         return True
-
-#     t = text.strip()
-#     if len(t) < 120:
-#         return True
-
-#     lower = t.lower()
-
-#     for pat in _NOISE_PATTERNS:
-#         if re.search(pat, lower):
-#             return True
-
-#     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-#     if not lines:
-#         return True
-
-#     short_lines = sum(1 for ln in lines if len(ln) <= 40)
-#     short_ratio = short_lines / max(1, len(lines))
-
-#     punct = sum(t.count(ch) for ch in "?!;:")
-#     digit_ratio = sum(ch.isdigit() for ch in t) / max(1, len(t))
-#     comma_ratio = t.count(",") / max(1, len(t))
-
-#     if (short_ratio >= 0.70 or digit_ratio >= 0.12) and punct <= 1:
-#         return True
-
-#     if comma_ratio > 0.03 and punct == 0 and len(lines) >= 6:
-#         return True
-
-#     return False
 
 def _is_noise_chunk(text: str) -> bool:
     """
@@ -221,52 +136,6 @@ def _is_noise_chunk(text: str) -> bool:
     return False
 
 
-
-def _rewrite_queries(
-    question: str,
-    *,
-    llm_enabled: bool,
-    query_rewrite_enabled: bool,
-    query_rewrite_n: int,
-    build_llm_chain: Any,
-    get_llm_answer: Any,
-) -> list[str]:
-    """
-    Generate alternative search queries for better retrieval.
-    """
-    if not llm_enabled or not query_rewrite_enabled:
-        return [question]
-
-    rewrite_role = (
-        "You rewrite a user's question into short search queries for semantic retrieval.\n"
-        "Return 3 alternative queries (one per line), no numbering, no extra text.\n"
-        "Use synonyms and related phrases that may appear in books.\n"
-        "Do NOT answer the question."
-    )
-
-    try:
-        chain = build_llm_chain(rewrite_role)
-        raw = get_llm_answer(chain, question, context="")
-        lines = [line.strip(" -\t\r\n") for line in raw.splitlines() if line.strip()]
-
-        queries = []
-        for q in lines:
-            if q and q.lower() != question.lower():
-                queries.append(q)
-
-        merged = [question] + queries
-
-        seen = set()
-        out = []
-        for q in merged:
-            key = q.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(q)
-
-        return out[: max(1, query_rewrite_n + 1)]
-    except Exception:
-        return [question]
 
 
 def llm_filter_relevant_chunks(
@@ -407,20 +276,4 @@ def _retrieve_candidates(
 
     merged.sort(key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0)))
 
-    # CONTEXT_K = 8
-    # selected = merged[:CONTEXT_K]
-
-    # _dbg("=== RETRIEVAL SUMMARY ===")
-    # _dbg("total_rows:", total_rows)
-    # _dbg("dropped_noise:", dropped_noise)
-    # _dbg("dropped_dupe:", dropped_dupe)
-    # _dbg("kept_after_filters:", kept)
-    # _dbg("selected_for_context:", len(selected))
-    # if selected:
-    #     _dbg("selected rrf:", [round(getattr(ch, "_rrf", 0.0), 6) for ch in selected])
-    #     _dbg("selected distances:", [round(getattr(ch, "_distance", 0.0), 4) for ch in selected])
-    #     _dbg("selected sources:", [getattr(ch.document, "source", None) for ch in selected])
-    # _dbg("=========================")
-
-    # return selected
     return merged
