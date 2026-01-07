@@ -14,7 +14,6 @@ def build_llm_chain(
     role_prompt: str,
     model_name: str = "llama3.2:latest",
     temperature: float = 0.1,
-    append_default_rules=True
 ):
     """
     Factory: build and return a ready-to-use LangChain 'chain' (Prompt -> LLM).
@@ -82,14 +81,3 @@ def get_llm_answer(chain, question: str, context: str) -> str:
     return str(result)
 
 
-def format_response(question: str, answer: str, sources: list) -> str:
-    """
-    Format the final markdown response with the question, answer, and top sources.
-    """
-    response = f"**Question:** {question}\n\n"
-    response += f"**Answer:** {answer}\n\n"
-    response += "**Sources:**\n"
-    for i, chunk in enumerate(sources[:3], 1):
-        preview = chunk[:100].replace("\n", " ") + "..."
-        response += f"{i}. {preview}\n"
-    return response
