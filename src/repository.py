@@ -6,7 +6,7 @@ import os
 import re
 
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z'\-]{2,}")
-
+TOP_K = 20
 DEBUG_LOGS = os.getenv("DEBUG_LOGS", "0") == "1"
 
 

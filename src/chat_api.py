@@ -187,6 +187,8 @@ def chat(request: ChatRequest):
             candidates = filtered
 
         # 5) Final context truncation AFTER filter
+        candidates.sort(key=lambda c: (c["score"] is None, c["score"]))
+
         candidates = candidates[:CONTEXT_K]
 
         stored_records = len(candidates)
