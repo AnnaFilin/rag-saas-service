@@ -55,29 +55,23 @@ def normalize_query_for_retrieval(question: str) -> str:
 
 def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
     """
-    Post-filter chunks by main entity mentioned in the question.
-    Universal: works for plants, places, people, terms.
-    If filtering becomes too aggressive, falls back to original chunks.
+    Apply entity focus ONLY when the question contains a clear named entity.
+    If the question is generic (no entity), do not filter.
     """
-    q = question.lower()
+    q = (question or "").strip().lower()
 
-    latin_match = re.findall(r"\b[a-z]+ [a-z]+\b", q)
-    entity_terms = set(latin_match)
+    # Heuristic: detect "entity-like" queries by requiring at least one strong entity signal.
+    # This function must stay domain-agnostic.
+    entity_terms = set(re.findall(r"\b[a-z]{3,}(?:[-'][a-z]{2,})+\b", q))
 
-    if not entity_terms:
-        entity_terms = {
-            w
-            for w in re.findall(r"[a-z]{5,}", q)
-            if w
-            not in {"which", "about", "include", "describe", "traditional", "documented"}
-        }
-
+    # Also allow two-word capitalized patterns if you later support non-latin text;
+    # for now keep it simple and safe: if no entity signal -> do not filter.
     if not entity_terms:
         return chunks
 
     focused = []
     for ch in chunks:
-        text = (ch.content or "").lower()
+        text = (getattr(ch, "content", "") or "").lower()
         if any(term in text for term in entity_terms):
             focused.append(ch)
 
@@ -87,41 +81,145 @@ def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
     return focused
 
 
+
+# def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
+#     """
+#     Post-filter chunks by main entity mentioned in the question.
+#     Universal: works for plants, places, people, terms.
+#     If filtering becomes too aggressive, falls back to original chunks.
+#     """
+#     q = question.lower()
+
+#     latin_match = re.findall(r"\b[a-z]+ [a-z]+\b", q)
+#     entity_terms = set(latin_match)
+
+#     if not entity_terms:
+#         entity_terms = {
+#             w
+#             for w in re.findall(r"[a-z]{5,}", q)
+#             if w
+#             not in {"which", "about", "include", "describe", "traditional", "documented"}
+#         }
+
+#     if not entity_terms:
+#         return chunks
+
+#     focused = []
+#     for ch in chunks:
+#         text = (ch.content or "").lower()
+#         if any(term in text for term in entity_terms):
+#             focused.append(ch)
+
+#     if len(focused) < min_keep:
+#         return chunks
+
+#     return focused
+
+
+# def _is_noise_chunk(text: str) -> bool:
+#     """
+#     Conservative, universal noise filter.
+#     """
+#     if not text:
+#         return True
+
+#     t = text.strip()
+#     if len(t) < 120:
+#         return True
+
+#     lower = t.lower()
+
+#     for pat in _NOISE_PATTERNS:
+#         if re.search(pat, lower):
+#             return True
+
+#     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+#     if not lines:
+#         return True
+
+#     short_lines = sum(1 for ln in lines if len(ln) <= 40)
+#     short_ratio = short_lines / max(1, len(lines))
+
+#     punct = sum(t.count(ch) for ch in "?!;:")
+#     digit_ratio = sum(ch.isdigit() for ch in t) / max(1, len(t))
+#     comma_ratio = t.count(",") / max(1, len(t))
+
+#     if (short_ratio >= 0.70 or digit_ratio >= 0.12) and punct <= 1:
+#         return True
+
+#     if comma_ratio > 0.03 and punct == 0 and len(lines) >= 6:
+#         return True
+
+#     return False
+
 def _is_noise_chunk(text: str) -> bool:
     """
-    Conservative, universal noise filter.
+    Universal STRUCTURAL noise filter (domain-agnostic).
+    Detects formatting-heavy / non-explanatory chunks such as:
+    - TOC-like lists
+    - index-like entries
+    - pure Q/A prompts blocks
+    - header/footer/page artifacts
+    - table-like dense columns
+    Uses only structural signals (no topic-specific keywords).
     """
+
     if not text:
         return True
 
     t = text.strip()
-    if len(t) < 120:
+    if len(t) < 160:
         return True
-
-    lower = t.lower()
-
-    for pat in _NOISE_PATTERNS:
-        if re.search(pat, lower):
-            return True
 
     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
     if not lines:
         return True
 
-    short_lines = sum(1 for ln in lines if len(ln) <= 40)
-    short_ratio = short_lines / max(1, len(lines))
+    # 1) Too many very short lines -> list/TOC/table fragments
+    if len(lines) >= 8:
+        short_lines = sum(1 for ln in lines if len(ln) <= 45)
+        if short_lines / len(lines) >= 0.70:
+            return True
 
-    punct = sum(t.count(ch) for ch in "?!;:")
-    digit_ratio = sum(ch.isdigit() for ch in t) / max(1, len(t))
-    comma_ratio = t.count(",") / max(1, len(t))
-
-    if (short_ratio >= 0.70 or digit_ratio >= 0.12) and punct <= 1:
+    # 2) Question-prompt blocks: many lines starting with numbering/bullets
+    bulletish = 0
+    for ln in lines[:30]:
+        # patterns like: "1.", "1)", "(1)", "-", "•", "*"
+        if ln[:2].isdigit() and (ln[1:2] in {".", ")"} or ln[2:3] in {".", ")"}):
+            bulletish += 1
+        elif ln.startswith(("-", "•", "*")):
+            bulletish += 1
+        elif ln.startswith(("(", "[")) and len(ln) > 2 and ln[1].isdigit():
+            bulletish += 1
+    if len(lines) >= 6 and bulletish >= 4:
         return True
 
-    if comma_ratio > 0.03 and punct == 0 and len(lines) >= 6:
+    # 3) Table-like: high digit density OR many repeated separators with low punctuation variety
+    total_chars = len(t)
+    digit_ratio = sum(ch.isdigit() for ch in t) / max(1, total_chars)
+    comma_ratio = t.count(",") / max(1, total_chars)
+    pipe_count = t.count("|")
+    tab_count = t.count("\t")
+    sep_count = t.count("  ")  # double spaces often in OCR tables
+
+    if digit_ratio >= 0.14:
         return True
+    if (pipe_count + tab_count) >= 6:
+        return True
+    if comma_ratio >= 0.05 and len(lines) >= 6:
+        return True
+    if sep_count >= 20 and len(lines) >= 8:
+        return True
+
+    # 4) Header/footer artifacts: many lines are nearly identical in shape/length
+    if len(lines) >= 10:
+        lens = [len(ln) for ln in lines[:30]]
+        same_len = sum(1 for x in lens if abs(x - lens[0]) <= 3)
+        if same_len / len(lens) >= 0.60:
+            return True
 
     return False
+
 
 
 def _rewrite_queries(

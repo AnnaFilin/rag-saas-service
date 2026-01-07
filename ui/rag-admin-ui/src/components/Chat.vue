@@ -55,7 +55,7 @@ async function submitQuestion() {
             body: JSON.stringify({
                 workspace_id: props.workspaceId,
                 question: question.value,
-                mode: ragMode.value, // "reference" | "synthesis" | "custom"
+                // mode: ragMode.value, // "reference" | "synthesis" | "custom"
                 role: ragMode.value === 'custom' && role.value.trim() ? role.value : null,
             }),
         })
