@@ -175,7 +175,6 @@ def llm_filter_relevant_chunks(
     except Exception:
         return candidates
 
-
 def _retrieve_candidates(
     db: Any,
     workspace_id: str,
@@ -250,10 +249,15 @@ def _retrieve_candidates(
         for ch, dist, rrf_score in rows:
             content = (ch.content or "")
 
+            ch_id = getattr(ch, "id", None)
+            ch_id_int = int(ch_id) if ch_id is not None else None
+
+            # Keep a small fallback pool so we never return empty after retrieval.
             if len(fallback_rows) < 50:
-                setattr(ch, "_distance", float(dist))
-                setattr(ch, "_rrf", float(rrf_score))
-                fallback_rows.append(ch)
+                if ch_id_int is None or ch_id_int not in seen_ids:
+                    setattr(ch, "_distance", float(dist))
+                    setattr(ch, "_rrf", float(rrf_score))
+                    fallback_rows.append(ch)
 
             if _is_noise_chunk(content):
                 dropped_noise += 1
@@ -263,8 +267,7 @@ def _retrieve_candidates(
                     _dbg(f"[DROP:NOISE] dist={float(dist):.4f} source={src}")
                 continue
 
-            ch_id = getattr(ch, "id", None)
-            if ch_id is not None and int(ch_id) in seen_ids:
+            if ch_id_int is not None and ch_id_int in seen_ids:
                 dropped_dupe += 1
                 if dupe_samples < 5:
                     dupe_samples += 1
@@ -272,15 +275,17 @@ def _retrieve_candidates(
                     _dbg(f"[DROP:DUPE] dist={float(dist):.4f} source={src}")
                 continue
 
-            if ch_id is not None:
-                seen_ids.add(int(ch_id))
+            if ch_id_int is not None:
+                seen_ids.add(ch_id_int)
 
             setattr(ch, "_distance", float(dist))
             setattr(ch, "_rrf", float(rrf_score))
             merged.append(ch)
             kept += 1
 
-    merged.sort(key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0)))
+    merged.sort(
+        key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0))
+    )
 
     if not merged and fallback_rows:
         fallback_rows.sort(
