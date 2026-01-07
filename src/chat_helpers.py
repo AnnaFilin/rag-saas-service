@@ -9,6 +9,13 @@ from typing import Any, List, Sequence
 DEBUG_LOGS = os.getenv("DEBUG_LOGS", "0") == "1"
 
 
+DEFAULT_ROLE = (
+    "You are a helpful assistant.\n"
+    "Answer ONLY using the provided context.\n"
+    "If information is missing, explicitly say it is not found in the provided sources.\n"
+    "Do NOT use external knowledge.\n"
+)
+
 def _dbg(*args):
     if DEBUG_LOGS:
         print(*args)
@@ -139,38 +146,76 @@ def llm_filter_relevant_chunks(
     question: str,
     candidates: list[dict],
     *,
-    build_llm_chain: Any,
-    get_llm_answer: Any,
+    build_llm_chain,
+    get_llm_answer,
 ) -> list[dict]:
     """
-    Ask LLM which chunks are actually relevant to the question.
+    Returns a subset of candidates that are explicitly relevant to the question.
+    If the model cannot find relevant evidence, returns an empty list (STRICT gate).
     """
+
     if not candidates:
-        return candidates
+        return []
 
-    items = []
-    for i, c in enumerate(candidates):
-        text = (c.get("content") or "").strip()
-        preview = text[:300].replace("\n", " ")
-        items.append(f"[{i}] {preview}")
-
-    filter_prompt = (
-        "You are given a question and a list of text chunks.\n"
-        "Select ONLY the chunks that contain information directly relevant to the question.\n"
-        "Ignore chunks about other entities, lists, tables, catalogs, or unrelated topics.\n\n"
-        "Return ONLY a comma-separated list of indices (for example: 0,2,3).\n"
-        "If none are relevant, return an empty line.\n\n"
-        f"Question:\n{question}\n\n"
-        "Chunks:\n" + "\n".join(items)
+    # Keep the prompt compact and deterministic.
+    # IMPORTANT: The model must return only JSON.
+    system_role = (
+        "You are a strict evidence filter. "
+        "You must ONLY keep chunks that clearly contain information to answer the question. "
+        "If none are clearly relevant, return an empty list. "
+        "Do not guess, do not infer, do not use outside knowledge."
     )
 
+    # We keep indices so we can return the original candidate objects safely.
+    numbered = []
+    for i, c in enumerate(candidates, start=1):
+        text = (c.get("content") or "").strip()
+        if not text:
+            continue
+        numbered.append(
+            f"[{i}] SOURCE={c.get('source')}\n{text}"
+        )
+
+    if not numbered:
+        return []
+
+    context = "\n\n---\n\n".join(numbered)
+
+    prompt = (
+        f"{system_role}\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"SOURCES:\n{context}\n\n"
+        "Return ONLY valid JSON in the following format:\n"
+        '{ "relevant": [1, 2, 3] }\n'
+        "Rules:\n"
+        "- relevant is a list of source numbers that contain direct evidence.\n"
+        "- If there is no direct evidence, return {\"relevant\": []}.\n"
+    )
+
+    # Reuse your existing chain builders to avoid new dependencies.
+    chain = build_llm_chain(DEFAULT_ROLE)
+    raw = get_llm_answer(chain, prompt, "")  # context already embedded in prompt
+
+    # Robust JSON parsing with safe fallback to STRICT empty.
     try:
-        chain = build_llm_chain("You are a strict relevance filter. Do not explain anything.")
-        raw = get_llm_answer(chain, filter_prompt, context="")
-        indices = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
-        return [candidates[i] for i in indices if 0 <= i < len(candidates)]
+        import json
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return []
+        data = json.loads(raw[start : end + 1])
+        ids = data.get("relevant", [])
+        if not isinstance(ids, list):
+            return []
+        kept = []
+        for idx in ids:
+            if isinstance(idx, int) and 1 <= idx <= len(candidates):
+                kept.append(candidates[idx - 1])
+        return kept
     except Exception:
-        return candidates
+        return []
+
+        
 
 def _retrieve_candidates(
     db: Any,
@@ -291,3 +336,46 @@ def _retrieve_candidates(
         return fallback_rows
 
     return merged
+
+
+# --- Coverage gate (lexical overlap) ---
+
+_STOPWORDS = {
+    "a","an","the","and","or","but","if","then","else","when","while","to","of","in","on","for","from","by","with",
+    "is","are","was","were","be","been","being","do","does","did",
+    "what","which","who","whom","whose","where","when","why","how",
+    "about","into","over","under","between","among","as","at","it","this","that","these","those",
+}
+
+def _tokenize_for_coverage(text: str) -> set[str]:
+    # Keep it simple and deterministic (no entity extraction, no model calls).
+    text = (text or "").lower()
+    tokens = re.findall(r"[a-z]+", text)
+    return {t for t in tokens if len(t) >= 3 and t not in _STOPWORDS}
+
+def _passes_coverage_gate(question: str, candidates: list[dict[str, Any]]) -> bool:
+    """
+    Coverage gate: return True only if at least one chunk has enough lexical overlap
+    with the question. This is workspace-agnostic and avoids hardcoding entities.
+    """
+    q_terms = _tokenize_for_coverage(question)
+    if not q_terms:
+        # If we can't extract meaningful terms, do not block retrieval.
+        return True
+
+    best_overlap = 0.0
+    for c in candidates[:10]:  # only inspect top candidates
+        content = c.get("content") or ""
+        ch_terms = _tokenize_for_coverage(content)
+        if not ch_terms:
+            continue
+        overlap = len(q_terms & ch_terms) / max(1, len(q_terms))
+        if overlap > best_overlap:
+            best_overlap = overlap
+
+    # Conservative threshold: requires at least ~1 meaningful term overlap for typical questions.
+    return best_overlap >= 0.20
+
+
+
+    

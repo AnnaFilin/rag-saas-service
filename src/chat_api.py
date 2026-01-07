@@ -21,6 +21,7 @@ from src.chat_helpers import (
     _retrieve_candidates,
     rerank_by_lexical_overlap,
     llm_filter_relevant_chunks,
+    _passes_coverage_gate,
 )
 
 # =========================
@@ -132,9 +133,10 @@ def list_workspaces():
     finally:
         db.close()
 
-
 @app.post("/chat")
 def chat(request: ChatRequest):
+    print("=== CHAT HANDLER HIT: V2_MARKER_2026_01_07 ===", __file__)
+
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
 
@@ -145,7 +147,7 @@ def chat(request: ChatRequest):
     )
 
     db = SessionLocal()
-    candidates = []
+    candidates: list[dict] = []
     stored_records = 0
 
     try:
@@ -165,7 +167,7 @@ def chat(request: ChatRequest):
             request.question,
         )
 
-        # 2) Build candidates from MORE than final context (so LLM-filter has room)
+        # 2) Build candidates (pre-limit so filter has room)
         pre_limit = max(CONTEXT_K, min(TOP_K, 20))
         chunk_objs = chunk_objs[:pre_limit]
 
@@ -175,13 +177,13 @@ def chat(request: ChatRequest):
                 "document_id": getattr(ch, "document_id", None),
                 "chunk_index": getattr(ch, "index", None),
                 "content": ch.content,
-                "source": getattr(ch.document, "source", None),
+                "source": getattr(getattr(ch, "document", None), "source", None),
                 "score": getattr(ch, "_distance", None),
             }
             for ch in chunk_objs
         ]
 
-        # 3) LLM relevance filter (soft gate)
+        # 3) LLM relevance filter (hard coverage gate)
         filtered = llm_filter_relevant_chunks(
             request.question,
             candidates,
@@ -189,17 +191,25 @@ def chat(request: ChatRequest):
             get_llm_answer=get_llm_answer,
         )
 
-        if filtered:
+        if not filtered:
+            # No coverage => return empty sources
+            candidates = []
+            stored_records = 0
+        else:
             candidates = filtered
 
-        # 4) Final context truncation (ALWAYS)
-        candidates.sort(key=lambda c: (c["score"] is None, c["score"]))
-        candidates = candidates[:CONTEXT_K]
-        stored_records = len(candidates)
-
+            # 4) Final context truncation (only when coverage exists)
+            candidates.sort(key=lambda c: (c["score"] is None, c["score"]))
+            candidates = candidates[:CONTEXT_K]
+            stored_records = len(candidates)
 
     finally:
         db.close()
+
+    print("=== DEBUG ===",
+      "stored_records=", stored_records,
+      "len(candidates)=", len(candidates))
+
 
     # 5) Answering
     if stored_records == 0:
@@ -207,9 +217,7 @@ def chat(request: ChatRequest):
     elif not LLM_ENABLED:
         answer = "LLM is temporarily disabled."
     else:
-        context = "\n\n---\n\n".join(
-            c["content"] for c in candidates if c.get("content")
-        )
+        context = "\n\n---\n\n".join(c["content"] for c in candidates if c.get("content"))
         chain = build_llm_chain(effective_role)
         answer = get_llm_answer(chain, request.question, context)
 
@@ -218,11 +226,12 @@ def chat(request: ChatRequest):
         question=request.question,
         role=request.role,
         answer=answer,
-        sources=candidates,          # IMPORTANT: empty when no coverage
+        sources=candidates,
         stored_records=stored_records,
         llm_backend=llm_backend,
         llm_model=llm_model,
     )
+
 
 
 
