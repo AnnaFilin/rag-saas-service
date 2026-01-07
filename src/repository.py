@@ -5,10 +5,6 @@ from sqlalchemy import text
 import os
 import re
 
-
-TOP_K = 20
-MAX_DISTANCE = float(os.getenv("MAX_DISTANCE", "0.38"))
-
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z'\-]{2,}")
 
 DEBUG_LOGS = os.getenv("DEBUG_LOGS", "0") == "1"
