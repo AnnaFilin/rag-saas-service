@@ -48,7 +48,15 @@ def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
 
     # Heuristic: detect "entity-like" queries by requiring at least one strong entity signal.
     # This function must stay domain-agnostic.
-    entity_terms = set(re.findall(r"\b[a-z]{3,}(?:[-'][a-z]{2,})+\b", q))
+    entity_terms = set()
+
+    # 1) Latin binomial: "piper methysticum"
+    latin = re.findall(r"\b[a-z]{3,}\s+[a-z]{3,}\b", q)
+    for s in latin:
+        entity_terms.add(s.strip())
+
+    # 2) Hyphenated: "foo-bar"
+    entity_terms |= set(re.findall(r"\b[a-z]{3,}(?:[-'][a-z]{2,})+\b", q))
 
     # Also allow two-word capitalized patterns if you later support non-latin text;
     # for now keep it simple and safe: if no entity signal -> do not filter.
