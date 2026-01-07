@@ -19,7 +19,7 @@ from src.models import Workspace, Document, Chunk, Note  # noqa: F401
 
 from src.chat_helpers import (
     _retrieve_candidates,
-    focus_by_entity,
+    rerank_by_lexical_overlap,
     llm_filter_relevant_chunks,
 )
 
@@ -145,6 +145,9 @@ def chat(request: ChatRequest):
     )
 
     db = SessionLocal()
+    candidates = []
+    stored_records = 0
+
     try:
         # 1) Retrieval
         chunk_objs = _retrieve_candidates(
@@ -157,10 +160,12 @@ def chat(request: ChatRequest):
             get_top_k_chunks_fts=get_top_k_chunks_fts,
         )
 
-        # 2) Optional entity focus (already guarded inside helper)
-        chunk_objs = focus_by_entity(chunk_objs, request.question)
+        chunk_objs = rerank_by_lexical_overlap(
+            chunk_objs,
+            request.question,
+        )
 
-        # 3) Build candidates from MORE than final context (so LLM-filter has room)
+        # 2) Build candidates from MORE than final context (so LLM-filter has room)
         pre_limit = max(CONTEXT_K, min(TOP_K, 20))
         chunk_objs = chunk_objs[:pre_limit]
 
@@ -176,29 +181,29 @@ def chat(request: ChatRequest):
             for ch in chunk_objs
         ]
 
-        # 4) LLM relevance filter + fallback (never empty after retrieval)
+        # 3) LLM relevance filter (soft gate)
         filtered = llm_filter_relevant_chunks(
             request.question,
             candidates,
             build_llm_chain=build_llm_chain,
             get_llm_answer=get_llm_answer,
         )
+
         if filtered:
             candidates = filtered
 
-        # 5) Final context truncation AFTER filter
+        # 4) Final context truncation (ALWAYS)
         candidates.sort(key=lambda c: (c["score"] is None, c["score"]))
-
         candidates = candidates[:CONTEXT_K]
-
         stored_records = len(candidates)
+
 
     finally:
         db.close()
 
-    # 6) Answering
+    # 5) Answering
     if stored_records == 0:
-        answer = "This information is not found in the provided sources."
+        answer = "I do not know based on the provided context."
     elif not LLM_ENABLED:
         answer = "LLM is temporarily disabled."
     else:
@@ -213,11 +218,12 @@ def chat(request: ChatRequest):
         question=request.question,
         role=request.role,
         answer=answer,
-        sources=candidates,
+        sources=candidates,          # IMPORTANT: empty when no coverage
         stored_records=stored_records,
         llm_backend=llm_backend,
         llm_model=llm_model,
     )
+
 
 
 @app.post("/notes")

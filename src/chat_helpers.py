@@ -39,40 +39,29 @@ def normalize_query_for_retrieval(question: str) -> str:
     return q
 
 
-def focus_by_entity(chunks: List, question: str, min_keep: int = 3) -> List:
+
+def rerank_by_lexical_overlap(chunks: list, question: str) -> list:
     """
-    Apply entity focus ONLY when the question contains a clear named entity.
-    If the question is generic (no entity), do not filter.
+    Lightweight, universal re-ranker.
+    Does NOT filter, only reorders chunks.
     """
-    q = (question or "").strip().lower()
 
-    # Heuristic: detect "entity-like" queries by requiring at least one strong entity signal.
-    # This function must stay domain-agnostic.
-    entity_terms = set()
-
-    # 1) Latin binomial: "piper methysticum"
-    latin = re.findall(r"\b[a-z]{3,}\s+[a-z]{3,}\b", q)
-    for s in latin:
-        entity_terms.add(s.strip())
-
-    # 2) Hyphenated: "foo-bar"
-    entity_terms |= set(re.findall(r"\b[a-z]{3,}(?:[-'][a-z]{2,})+\b", q))
-
-    # Also allow two-word capitalized patterns if you later support non-latin text;
-    # for now keep it simple and safe: if no entity signal -> do not filter.
-    if not entity_terms:
+    q_terms = set(
+        w for w in re.findall(r"[a-zA-Z][a-zA-Z'\-]{2,}", question.lower())
+    )
+    if not q_terms:
         return chunks
 
-    focused = []
-    for ch in chunks:
-        text = (getattr(ch, "content", "") or "").lower()
-        if any(term in text for term in entity_terms):
-            focused.append(ch)
+    def score(ch):
+        text = (ch.content or "").lower()
+        return sum(1 for w in q_terms if w in text)
 
-    if len(focused) < min_keep:
-        return chunks
+    return sorted(
+        chunks,
+        key=lambda ch: (score(ch), -getattr(ch, "_rrf", 0.0)),
+        reverse=True,
+    )
 
-    return focused
 
 
 def _is_noise_chunk(text: str) -> bool:
