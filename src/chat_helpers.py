@@ -191,6 +191,7 @@ def _retrieve_candidates(
     """
 
     merged: list[Any] = []
+    fallback_rows: list[Any] = []
     seen_ids: set[int] = set()
 
     total_rows = 0
@@ -249,6 +250,11 @@ def _retrieve_candidates(
         for ch, dist, rrf_score in rows:
             content = (ch.content or "")
 
+            if len(fallback_rows) < 50:
+                setattr(ch, "_distance", float(dist))
+                setattr(ch, "_rrf", float(rrf_score))
+                fallback_rows.append(ch)
+
             if _is_noise_chunk(content):
                 dropped_noise += 1
                 if noise_samples < 5:
@@ -275,5 +281,11 @@ def _retrieve_candidates(
             kept += 1
 
     merged.sort(key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0)))
+
+    if not merged and fallback_rows:
+        fallback_rows.sort(
+            key=lambda ch: (-getattr(ch, "_rrf", 0.0), getattr(ch, "_distance", 999.0))
+        )
+        return fallback_rows
 
     return merged
