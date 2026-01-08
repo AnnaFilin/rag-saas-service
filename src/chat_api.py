@@ -5,7 +5,7 @@
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select, distinct
@@ -190,6 +190,10 @@ def chat(request: ChatRequest):
             build_llm_chain=build_llm_chain,
             get_llm_answer=get_llm_answer,
         )
+        # Deterministic guardrail: no keyword overlap => no coverage (workspace-agnostic).
+        if filtered and not _passes_coverage_gate(request.question, filtered):
+            filtered = []
+
 
         if not filtered:
             # No coverage => return empty sources
@@ -280,6 +284,21 @@ def list_notes(workspace_id: str):
                 for n in rows
             ]
         )
+    finally:
+        db.close()
+
+
+@app.delete("/notes/{note_id}")
+def delete_note(note_id: int):
+    db: Session = SessionLocal()
+    try:
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+
+        db.delete(note)
+        db.commit()
+        return {"ok": True}
     finally:
         db.close()
 

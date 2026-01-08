@@ -1,74 +1,53 @@
 <script setup>
-const props = defineProps({
-  ragMode: {
-    type: String,
-    required: true,
-  },
-  role: {
-    type: String,
-    required: true,
-  },
-})
-
-const emit = defineEmits(['update:ragMode', 'update:role'])
-
-function setMode(mode) {
-  emit('update:ragMode', mode)
-}
-
-function updateRole(value) {
-  emit('update:role', value)
-}
-</script>
-
-<template>
-  <div class="flex flex-col gap-2">
-    <label class="text-sm font-semibold text-slate-300">Mode</label>
-
-    <div class="flex flex-wrap gap-2">
-      <button
-        type="button"
-        class="px-3 py-1 text-xs rounded border"
-        :class="props.ragMode === 'reference'
-          ? 'bg-slate-800 border-slate-500 text-white'
-          : 'bg-transparent border-slate-700 text-slate-400'"
-        @click="setMode('reference')"
-      >
-        Reference
-      </button>
-
-      <button
-        type="button"
-        class="px-3 py-1 text-xs rounded border"
-        :class="props.ragMode === 'synthesis'
-          ? 'bg-slate-800 border-slate-500 text-white'
-          : 'bg-transparent border-slate-700 text-slate-400'"
-        @click="setMode('synthesis')"
-      >
-        Synthesis
-      </button>
-
-      <button
-        type="button"
-        class="px-3 py-1 text-xs rounded border"
-        :class="props.ragMode === 'custom'
-          ? 'bg-slate-800 border-slate-500 text-white'
-          : 'bg-transparent border-slate-700 text-slate-400'"
-        @click="setMode('custom')"
-      >
-        Custom
-      </button>
-    </div>
-
-    <div v-if="props.ragMode === 'custom'" class="mt-2 flex flex-col gap-2">
-      <label class="text-sm font-semibold text-slate-300">Role (custom)</label>
+  import { computed } from 'vue'
+  
+  const props = defineProps({
+    role: { type: String, required: true },
+  })
+  
+  const emit = defineEmits(['update:role'])
+  
+  const isRoleActive = computed(() => !!props.role.trim())
+  
+  function updateRole(value) {
+    emit('update:role', value)
+  }
+  
+  function clearRole() {
+    emit('update:role', '')
+  }
+  </script>
+  
+  <template>
+    <div class="flex flex-col gap-2">
+      <div class="flex items-center justify-between">
+        <label class="text-sm font-semibold text-slate-300">Custom role</label>
+  
+        <div class="flex items-center gap-2 text-xs">
+          <span class="text-slate-400">
+            <span :class="isRoleActive ? 'text-emerald-300' : 'text-slate-500'">
+              {{ isRoleActive ? 'active' : 'off' }}
+            </span>
+          </span>
+  
+          <button
+            v-if="isRoleActive"
+            type="button"
+            class="rounded-md px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800"
+            @click="clearRole"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+  
       <textarea
-        v-model="props.role"
+        :value="props.role"
+        @input="updateRole($event.target.value)"
         class="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-slate-500"
         rows="3"
         placeholder="Custom instruction for the assistant..."
-        @input="updateRole($event.target.value)"
       ></textarea>
     </div>
-  </div>
-</template>
+  </template>
+  

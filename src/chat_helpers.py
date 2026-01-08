@@ -142,6 +142,78 @@ def _is_noise_chunk(text: str) -> bool:
 
 
 
+# def llm_filter_relevant_chunks(
+#     question: str,
+#     candidates: list[dict],
+#     *,
+#     build_llm_chain,
+#     get_llm_answer,
+# ) -> list[dict]:
+#     """
+#     Returns a subset of candidates that are explicitly relevant to the question.
+#     If the model cannot find relevant evidence, returns an empty list (STRICT gate).
+#     """
+
+#     if not candidates:
+#         return []
+
+#     # Keep the prompt compact and deterministic.
+#     # IMPORTANT: The model must return only JSON.
+#     system_role = (
+#         "You are a strict evidence filter. "
+#         "You must ONLY keep chunks that clearly contain information to answer the question. "
+#         "If none are clearly relevant, return an empty list. "
+#         "Do not guess, do not infer, do not use outside knowledge."
+#     )
+
+#     # We keep indices so we can return the original candidate objects safely.
+#     numbered = []
+#     for i, c in enumerate(candidates, start=1):
+#         text = (c.get("content") or "").strip()
+#         if not text:
+#             continue
+#         numbered.append(
+#             f"[{i}] SOURCE={c.get('source')}\n{text}"
+#         )
+
+#     if not numbered:
+#         return []
+
+#     context = "\n\n---\n\n".join(numbered)
+
+#     prompt = (
+#         f"{system_role}\n\n"
+#         f"QUESTION:\n{question}\n\n"
+#         f"SOURCES:\n{context}\n\n"
+#         "Return ONLY valid JSON in the following format:\n"
+#         '{ "relevant": [1, 2, 3] }\n'
+#         "Rules:\n"
+#         "- relevant is a list of source numbers that contain direct evidence.\n"
+#         "- If there is no direct evidence, return {\"relevant\": []}.\n"
+#     )
+
+#     # Reuse your existing chain builders to avoid new dependencies.
+#     chain = build_llm_chain(DEFAULT_ROLE)
+#     raw = get_llm_answer(chain, prompt, "")  # context already embedded in prompt
+
+#     # Robust JSON parsing with safe fallback to STRICT empty.
+#     try:
+#         import json
+#         start = raw.find("{")
+#         end = raw.rfind("}")
+#         if start == -1 or end == -1 or end <= start:
+#             return []
+#         data = json.loads(raw[start : end + 1])
+#         ids = data.get("relevant", [])
+#         if not isinstance(ids, list):
+#             return []
+#         kept = []
+#         for idx in ids:
+#             if isinstance(idx, int) and 1 <= idx <= len(candidates):
+#                 kept.append(candidates[idx - 1])
+#         return kept
+#     except Exception:
+#         return []
 def llm_filter_relevant_chunks(
     question: str,
     candidates: list[dict],
@@ -150,53 +222,48 @@ def llm_filter_relevant_chunks(
     get_llm_answer,
 ) -> list[dict]:
     """
-    Returns a subset of candidates that are explicitly relevant to the question.
-    If the model cannot find relevant evidence, returns an empty list (STRICT gate).
+    Keep only candidates that contain direct evidence for the question.
+    Returns [] if no direct evidence is present (strict gate).
     """
 
     if not candidates:
         return []
 
-    # Keep the prompt compact and deterministic.
-    # IMPORTANT: The model must return only JSON.
+    # Use a dedicated strict role for gating.
     system_role = (
-        "You are a strict evidence filter. "
-        "You must ONLY keep chunks that clearly contain information to answer the question. "
-        "If none are clearly relevant, return an empty list. "
-        "Do not guess, do not infer, do not use outside knowledge."
+        "You are a strict evidence filter.\n"
+        "You must ONLY keep sources that contain direct evidence to answer the question.\n"
+        "If the question mentions a specific subject (e.g., a plant name like 'Withania somnifera'),\n"
+        "ONLY keep sources that explicitly mention that subject.\n"
+        "Do not guess. Do not infer. Do not use outside knowledge.\n"
+        "Return ONLY valid JSON.\n"
     )
 
-    # We keep indices so we can return the original candidate objects safely.
+
     numbered = []
     for i, c in enumerate(candidates, start=1):
         text = (c.get("content") or "").strip()
         if not text:
             continue
-        numbered.append(
-            f"[{i}] SOURCE={c.get('source')}\n{text}"
-        )
+        numbered.append(f"[{i}] SOURCE={c.get('source')}\n{text}")
 
     if not numbered:
         return []
 
     context = "\n\n---\n\n".join(numbered)
 
-    prompt = (
-        f"{system_role}\n\n"
+    gate_question = (
         f"QUESTION:\n{question}\n\n"
-        f"SOURCES:\n{context}\n\n"
-        "Return ONLY valid JSON in the following format:\n"
+        "Return ONLY valid JSON in this format:\n"
         '{ "relevant": [1, 2, 3] }\n'
         "Rules:\n"
         "- relevant is a list of source numbers that contain direct evidence.\n"
         "- If there is no direct evidence, return {\"relevant\": []}.\n"
     )
 
-    # Reuse your existing chain builders to avoid new dependencies.
-    chain = build_llm_chain(DEFAULT_ROLE)
-    raw = get_llm_answer(chain, prompt, "")  # context already embedded in prompt
+    chain = build_llm_chain(system_role)
+    raw = get_llm_answer(chain, gate_question, context)
 
-    # Robust JSON parsing with safe fallback to STRICT empty.
     try:
         import json
         start = raw.find("{")
@@ -344,7 +411,8 @@ _STOPWORDS = {
     "a","an","the","and","or","but","if","then","else","when","while","to","of","in","on","for","from","by","with",
     "is","are","was","were","be","been","being","do","does","did",
     "what","which","who","whom","whose","where","when","why","how",
-    "about","into","over","under","between","among","as","at","it","this","that","these","those",
+    "about","into","over","under","between","among","as","at","it","this","that","these","those","based", "only", "provided", "context", "extract", "list", "present",
+    "bullet", "separate", "explicitly", "stated", "summarize", "paragraph",
 }
 
 def _tokenize_for_coverage(text: str) -> set[str]:

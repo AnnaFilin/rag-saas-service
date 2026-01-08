@@ -47,6 +47,37 @@ async function loadNotes() {
   }
 }
 
+async function deleteNote(noteId) {
+  if (!noteId) return
+
+  const ok = window.confirm('Delete this note?')
+  if (!ok) return
+
+  try {
+    const res = await fetch(`/api/rag/notes/${encodeURIComponent(noteId)}`, {
+      method: 'DELETE',
+    })
+
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || `Delete failed: ${res.status}`)
+    }
+
+   
+    loadedNotes.value = (loadedNotes.value || []).filter((n) => n.id !== noteId)
+
+    
+    if (selectedId.value === noteId) {
+      const next = loadedNotes.value?.[0]
+      selectedId.value = next ? next.id : null
+    }
+  } catch (err) {
+    console.error('Delete note failed', err)
+    window.alert(err?.message || 'Delete note failed')
+  }
+}
+
+
 const note = computed(() => {
   const list = loadedNotes.value || []
   if (!list.length) return null
@@ -91,15 +122,17 @@ function showMore() {
     </div>
 
     <div class="rag-card flex-1 min-h-0 flex flex-col gap-4">
-      <div class="grid flex-1 gap-4 md:grid-cols-[minmax(0,0.55fr)_minmax(0,0.45fr)]">
+      <div class="grid flex-1 gap-4 md:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
         <div class="flex flex-col gap-4 min-h-0">
           <NotesList
-            :notes="visibleNotes"
-            :isLoading="isLoading"
-            :errorText="errorText"
-            :selectedId="selectedId"
-            @select="selectNote"
-          />
+  :notes="visibleNotes"
+  :isLoading="isLoading"
+  :errorText="errorText"
+  :selectedId="selectedId"
+  @select="selectNote"
+  @delete="deleteNote"
+/>
+
 
           <button
             v-if="canShowMore"

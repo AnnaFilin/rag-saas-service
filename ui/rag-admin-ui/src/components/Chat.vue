@@ -1,5 +1,5 @@
 <script setup>
-import AnswerSources from './chat/AnswerSources.vue'
+import AnswerPanel from './chat/AnswerPanel.vue'
 import ModeSelector from './chat/ModeSelector.vue'
 import QuestionInput from './chat/QuestionInput.vue'
 import ChatModeToggle from './chat/ChatModeToggle.vue'
@@ -15,11 +15,11 @@ const props = defineProps({
 })
 
 const question = ref('')
+const lastQuestion = ref('')
 const role = ref('')
 const isLoading = ref(false)
 const errorText = ref('')
 const saveStatus = ref('')
-const ragMode = ref('reference')
 const answer = ref('')
 const sources = ref([])
 const chatMode = ref('local') // 'cloud' | 'local'
@@ -37,9 +37,8 @@ const showAllSources = ref(false)
 async function submitQuestion() {
     showAllSources.value = false
 
-    if (!question.value.trim()) {
-        return
-    }
+    const q = question.value.trim()
+    if (!q) return
 
     isLoading.value = true
     errorText.value = ''
@@ -47,16 +46,14 @@ async function submitQuestion() {
     sources.value = []
     const endpoint = CHAT_ENDPOINTS[chatMode.value]
 
-
     try {
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 workspace_id: props.workspaceId,
-                question: question.value,
-                // mode: ragMode.value, // "reference" | "synthesis" | "custom"
-                role: ragMode.value === 'custom' && role.value.trim() ? role.value : null,
+                question: q,
+                role: role.value.trim() ? role.value.trim() : null,
             }),
         })
 
@@ -66,17 +63,18 @@ async function submitQuestion() {
 
         const data = await response.json()
 
-        console.log('endpoint:', endpoint)
-        console.log('source sample:', data.sources?.[0])
-
         answer.value = data.answer || ''
         sources.value = Array.isArray(data.sources) ? data.sources : []
+
+        lastQuestion.value = q
+        question.value = '' // clear input after successful request
     } catch (error) {
         errorText.value = error.message
     } finally {
         isLoading.value = false
     }
 }
+
 
 function saveCurrentNote() {
     if (!answer.value.trim()) return
@@ -109,7 +107,7 @@ function saveCurrentNote() {
     }
 
     emit('save-note', {
-        question: question.value,
+        question: lastQuestion.value || '',
         answer: answer.value,
         sources: normalizedSources,
         workspaceId: props.workspaceId,
@@ -132,8 +130,7 @@ function saveCurrentNote() {
         <div class="rag-card-soft flex flex-col gap-3">
             <QuestionInput :modelValue="question" @update:modelValue="question = $event" />
 
-            <ModeSelector :ragMode="ragMode" :role="role" @update:ragMode="ragMode = $event"
-                @update:role="role = $event" />
+            <ModeSelector :role="role" @update:role="role = $event" />
 
             <ChatStatusRow :isLoading="isLoading" :errorText="errorText" />
 
@@ -146,11 +143,7 @@ function saveCurrentNote() {
 
             <AnswerHeader :isLoading="isLoading" :canSave="!!answer.trim() && !isLoading" :saveStatus="saveStatus"
                 @save="saveCurrentNote" />
-            <div class="flex-1 rounded-lg border border-slate-800 bg-slate-950 p-4 text-sm text-slate-100">
-                {{ answer }}
-
-                <AnswerSources :sources="sources" :answer="answer" />
-            </div>
+            <AnswerPanel :lastQuestion="lastQuestion" :answer="answer" :sources="sources" />
 
             <ErrorBanner v-if="errorText" :text="errorText" />
         </div>
