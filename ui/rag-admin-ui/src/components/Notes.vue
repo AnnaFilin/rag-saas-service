@@ -16,6 +16,8 @@ const errorText = ref('')
 const loadedNotes = ref([])
 const limit = ref(5)
 const selectedId = ref(null)
+const toast = ref('')
+let toastTimer = null
 
 watch(
   () => props.workspaceId,
@@ -71,10 +73,22 @@ async function deleteNote(noteId) {
       const next = loadedNotes.value?.[0]
       selectedId.value = next ? next.id : null
     }
+
+    showToast('Note deleted')
+
   } catch (err) {
     console.error('Delete note failed', err)
     window.alert(err?.message || 'Delete note failed')
   }
+}
+
+function showToast(message, ms = 2500) {
+  toast.value = message
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = ''
+    toastTimer = null
+  }, ms)
 }
 
 
@@ -122,6 +136,12 @@ function showMore() {
     </div>
 
     <div class="rag-card flex-1 min-h-0 flex flex-col gap-4">
+      <div
+  v-if="toast"
+  class="mb-2 rounded-lg border border-emerald-700 bg-emerald-900/30 px-3 py-2 text-xs text-emerald-200"
+>
+  {{ toast }}
+</div>
       <div class="grid flex-1 gap-4 md:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
         <div class="flex flex-col gap-4 min-h-0">
           <NotesList

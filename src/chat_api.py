@@ -22,6 +22,8 @@ from src.chat_helpers import (
     rerank_by_lexical_overlap,
     llm_filter_relevant_chunks,
     _passes_coverage_gate,
+    _extract_subject_phrase,
+    deterministic_filter_relevant_chunks,
 )
 
 # =========================
@@ -37,6 +39,15 @@ DEFAULT_ROLE = (
     "Answer ONLY using the provided context.\n"
     "If information is missing, explicitly say it is not found in the provided sources.\n"
     "Do NOT use external knowledge.\n"
+)
+
+STRICT_ANSWER_ROLE = (
+    "You are a strict QA assistant.\n"
+    "Answer ONLY using the provided context.\n"
+    "Do NOT use outside knowledge.\n"
+    "Do NOT infer or guess.\n"
+    "If the context does NOT explicitly contain the answer, reply exactly:\n"
+    "Not stated in the provided context.\n"
 )
 
 # =========================
@@ -133,12 +144,19 @@ def list_workspaces():
     finally:
         db.close()
 
+
 @app.post("/chat")
 def chat(request: ChatRequest):
     print("=== CHAT HANDLER HIT: V2_MARKER_2026_01_07 ===", __file__)
 
     llm_backend = os.getenv("LLM_BACKEND", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2:latest")
+
+    # LLM filter toggle (defaults ON)
+    llm_filter_enabled = (
+        os.getenv("LLM_FILTER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+    )
+    print("DBG LLM_FILTER_ENABLED =", llm_filter_enabled)
 
     effective_role = (
         request.role.strip()
@@ -167,33 +185,101 @@ def chat(request: ChatRequest):
             request.question,
         )
 
+        # 🔒 Snapshot content to avoid any ORM/lazy-load/state weirdness
+        for ch in chunk_objs:
+            ch._content_snapshot = ch.content
+
+        print("\n=== DEBUG RETRIEVAL (after rerank, before subject/LLM) ===")
+        for i, ch in enumerate(chunk_objs[:20]):
+            text = (ch.content or "")[:200].replace("\n", " ")
+            print(
+                f"[{i}] "
+                f"doc={getattr(ch, 'document_id', None)} "
+                f"chunk={getattr(ch, 'id', None)} "
+                f"score={getattr(ch, '_distance', None)} "
+                f"text={text}"
+            )
+
         # 2) Build candidates (pre-limit so filter has room)
         pre_limit = max(CONTEXT_K, min(TOP_K, 20))
         chunk_objs = chunk_objs[:pre_limit]
+
+        print("\n=== DEBUG CONTENT IDS ===")
+        for i, ch in enumerate(chunk_objs[:10]):
+            print(i, "chunk_id=", getattr(ch, "id", None), "content_id=", id(ch.content))
 
         candidates = [
             {
                 "chunk_id": getattr(ch, "id", None),
                 "document_id": getattr(ch, "document_id", None),
                 "chunk_index": getattr(ch, "index", None),
-                "content": ch.content,
+                "content": getattr(ch, "_content_snapshot", ch.content),
                 "source": getattr(getattr(ch, "document", None), "source", None),
                 "score": getattr(ch, "_distance", None),
             }
             for ch in chunk_objs
         ]
 
-        # 3) LLM relevance filter (hard coverage gate)
-        filtered = llm_filter_relevant_chunks(
-            request.question,
-            candidates,
-            build_llm_chain=build_llm_chain,
-            get_llm_answer=get_llm_answer,
-        )
+        subject = _extract_subject_phrase(request.question)
+        print("DBG subject =", repr(subject))
+        print("DBG candidates before subject filter =", len(candidates))
+
+        if subject:
+            subj_l = subject.lower()
+            candidates = [
+                c for c in candidates
+                if subj_l in (c.get("content") or "").lower()
+            ]
+
+        print("DBG candidates after subject filter =", len(candidates))
+
+        print("\n=== DEBUG CANDIDATES (before filtering) ===")
+        for i, c in enumerate(candidates[:20]):
+            text = (c.get("content") or "")[:200].replace("\n", " ")
+            print(
+                f"[{i}] "
+                f"doc={c.get('document_id')} "
+                f"chunk={c.get('chunk_id')} "
+                f"score={c.get('score')} "
+                f"text={text}"
+            )
+
+        # Freeze content (defensive): keep original content stable across filter steps
+        for c in candidates:
+            c["_content_frozen"] = c.get("content")
+
+        # 3) Filtering (LLM filter optional; deterministic filter when LLM filter is OFF)
+        if llm_filter_enabled:
+            filtered = llm_filter_relevant_chunks(
+                request.question,
+                candidates,
+                build_llm_chain=build_llm_chain,
+                get_llm_answer=get_llm_answer,
+            )
+        else:
+            # NOTE: implement this helper in your helpers file
+            # It MUST be workspace-agnostic and NOT use domain keywords.
+            filtered = deterministic_filter_relevant_chunks(request.question, candidates)
+
+        # Restore frozen content if any filter mutated/overwrote it
+        for c in filtered:
+            if "_content_frozen" in c:
+                c["content"] = c["_content_frozen"]
+
+        print("\n=== DEBUG AFTER FILTER ===")
+        for i, c in enumerate(filtered[:20]):
+            text = (c.get("content") or "")[:200].replace("\n", " ")
+            print(
+                f"[{i}] "
+                f"doc={c.get('document_id')} "
+                f"chunk={c.get('chunk_id')} "
+                f"score={c.get('score')} "
+                f"text={text}"
+            )
+
         # Deterministic guardrail: no keyword overlap => no coverage (workspace-agnostic).
         if filtered and not _passes_coverage_gate(request.question, filtered):
             filtered = []
-
 
         if not filtered:
             # No coverage => return empty sources
@@ -210,20 +296,62 @@ def chat(request: ChatRequest):
     finally:
         db.close()
 
-    print("=== DEBUG ===",
-      "stored_records=", stored_records,
-      "len(candidates)=", len(candidates))
+    print(
+        "=== DEBUG ===",
+        "stored_records=", stored_records,
+        "len(candidates)=", len(candidates)
+    )
 
-
-    # 5) Answering
+    # 5) Answering (this is separate from the LLM filter toggle)
+    # if stored_records == 0:
+    #     answer = "I do not know based on the provided context."
+    # elif not LLM_ENABLED:
+    #     answer = "LLM is temporarily disabled."
+    # else:
+    #     context = "\n\n---\n\n".join(
+    #         c["content"] for c in candidates
+    #         if c.get("content")
+    #     )
+    #     chain = build_llm_chain(effective_role)
+    #     answer = get_llm_answer(chain, request.question, context)
     if stored_records == 0:
         answer = "I do not know based on the provided context."
     elif not LLM_ENABLED:
         answer = "LLM is temporarily disabled."
     else:
-        context = "\n\n---\n\n".join(c["content"] for c in candidates if c.get("content"))
-        chain = build_llm_chain(effective_role)
+        context = "\n\n---\n\n".join(
+            c["content"] for c in candidates
+            if c.get("content")
+        )
+
+        # ✅ Logs in the correct place (final answering)
+        print("\n=== DEBUG ANSWER INPUT ===")
+        print("DBG stored_records =", stored_records)
+        print("DBG context_chars =", len(context))
+        print("DBG role_used = STRICT_ANSWER_ROLE")  # keep it explicit
+
+        # ✅ Use strict role for final answering (prevents 'it can be inferred')
+        role_for_answer = request.role.strip() if request.role and request.role.strip() else STRICT_ANSWER_ROLE
+        print("DBG role_used =", "request.role" if role_for_answer != STRICT_ANSWER_ROLE else "STRICT_ANSWER_ROLE")
+        chain = build_llm_chain(role_for_answer)
         answer = get_llm_answer(chain, request.question, context)
+
+        # Hard normalization: forbid mixed "answered + I do not know"
+        lower = (answer or "").strip().lower()
+
+        # If model appended generic fallback, remove it.
+        bad_tail = "i do not know based on the provided context."
+        if bad_tail in lower:
+            # keep everything before the bad tail
+            cut = lower.find(bad_tail)
+            answer = answer[:cut].strip()
+
+        if any(x in (answer or "").lower() for x in ["inferred", "implies", "it can be inferred"]):
+            answer = "Not stated in the provided context."
+
+        # If answer is empty after cleanup -> strict fallback
+        if not answer.strip():
+            answer = "Not stated in the provided context."
 
     return ChatResponse(
         workspace_id=request.workspace_id,
@@ -235,7 +363,6 @@ def chat(request: ChatRequest):
         llm_backend=llm_backend,
         llm_model=llm_model,
     )
-
 
 
 

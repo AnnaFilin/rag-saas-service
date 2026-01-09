@@ -142,78 +142,39 @@ def _is_noise_chunk(text: str) -> bool:
 
 
 
-# def llm_filter_relevant_chunks(
-#     question: str,
-#     candidates: list[dict],
-#     *,
-#     build_llm_chain,
-#     get_llm_answer,
-# ) -> list[dict]:
-#     """
-#     Returns a subset of candidates that are explicitly relevant to the question.
-#     If the model cannot find relevant evidence, returns an empty list (STRICT gate).
-#     """
+def _extract_subject_phrase(question: str) -> str | None:
+    """
+    Extract a specific subject phrase (if any) from the question.
+    Supports scientific-like binomials "Genus species" but avoids question starters
+    like "Which plants", "Based only", etc.
+    """
+    q = (question or "").strip()
+    m = re.search(r"\b([A-Z][a-z]{2,})\s+([a-z]{2,})\b", q)
+    if not m:
+        return None
 
-#     if not candidates:
-#         return []
+    first = m.group(1)
+    second = m.group(2)
 
-#     # Keep the prompt compact and deterministic.
-#     # IMPORTANT: The model must return only JSON.
-#     system_role = (
-#         "You are a strict evidence filter. "
-#         "You must ONLY keep chunks that clearly contain information to answer the question. "
-#         "If none are clearly relevant, return an empty list. "
-#         "Do not guess, do not infer, do not use outside knowledge."
-#     )
+    # Filter out common question/prompt starters and generic words.
+    bad_first = {
+        "What", "Which", "Who", "Whom", "Whose", "Where", "When", "Why", "How",
+        "Based", "Extract", "List", "Summarize", "Write", "Provide", "Give",
+        "Return", "Include", "Present",
+    }
+    bad_second = {
+        "only", "provided", "context", "sources", "information", "facts",
+        "items", "data", "text", "question",
+    }
 
-#     # We keep indices so we can return the original candidate objects safely.
-#     numbered = []
-#     for i, c in enumerate(candidates, start=1):
-#         text = (c.get("content") or "").strip()
-#         if not text:
-#             continue
-#         numbered.append(
-#             f"[{i}] SOURCE={c.get('source')}\n{text}"
-#         )
+    if first in bad_first:
+        return None
+    if second in bad_second:
+        return None
 
-#     if not numbered:
-#         return []
+    return f"{first} {second}"
 
-#     context = "\n\n---\n\n".join(numbered)
 
-#     prompt = (
-#         f"{system_role}\n\n"
-#         f"QUESTION:\n{question}\n\n"
-#         f"SOURCES:\n{context}\n\n"
-#         "Return ONLY valid JSON in the following format:\n"
-#         '{ "relevant": [1, 2, 3] }\n'
-#         "Rules:\n"
-#         "- relevant is a list of source numbers that contain direct evidence.\n"
-#         "- If there is no direct evidence, return {\"relevant\": []}.\n"
-#     )
-
-#     # Reuse your existing chain builders to avoid new dependencies.
-#     chain = build_llm_chain(DEFAULT_ROLE)
-#     raw = get_llm_answer(chain, prompt, "")  # context already embedded in prompt
-
-#     # Robust JSON parsing with safe fallback to STRICT empty.
-#     try:
-#         import json
-#         start = raw.find("{")
-#         end = raw.rfind("}")
-#         if start == -1 or end == -1 or end <= start:
-#             return []
-#         data = json.loads(raw[start : end + 1])
-#         ids = data.get("relevant", [])
-#         if not isinstance(ids, list):
-#             return []
-#         kept = []
-#         for idx in ids:
-#             if isinstance(idx, int) and 1 <= idx <= len(candidates):
-#                 kept.append(candidates[idx - 1])
-#         return kept
-#     except Exception:
-#         return []
 def llm_filter_relevant_chunks(
     question: str,
     candidates: list[dict],
@@ -229,7 +190,6 @@ def llm_filter_relevant_chunks(
     if not candidates:
         return []
 
-    # Use a dedicated strict role for gating.
     system_role = (
         "You are a strict evidence filter.\n"
         "You must ONLY keep sources that contain direct evidence to answer the question.\n"
@@ -239,13 +199,17 @@ def llm_filter_relevant_chunks(
         "Return ONLY valid JSON.\n"
     )
 
-
     numbered = []
-    for i, c in enumerate(candidates, start=1):
+    idx_map: list[int] = []  # shown_number -> candidates_index
+
+    for cand_idx, c in enumerate(candidates):
         text = (c.get("content") or "").strip()
         if not text:
             continue
-        numbered.append(f"[{i}] SOURCE={c.get('source')}\n{text}")
+
+        shown_number = len(numbered) + 1
+        numbered.append(f"[{shown_number}] SOURCE={c.get('source')}\n{text}")
+        idx_map.append(cand_idx)
 
     if not numbered:
         return []
@@ -266,18 +230,25 @@ def llm_filter_relevant_chunks(
 
     try:
         import json
+
         start = raw.find("{")
         end = raw.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return []
+
         data = json.loads(raw[start : end + 1])
         ids = data.get("relevant", [])
         if not isinstance(ids, list):
             return []
+
         kept = []
-        for idx in ids:
-            if isinstance(idx, int) and 1 <= idx <= len(candidates):
-                kept.append(candidates[idx - 1])
+        for shown_idx in ids:
+            if not isinstance(shown_idx, int):
+                continue
+            if 1 <= shown_idx <= len(idx_map):
+                cand_idx = idx_map[shown_idx - 1]
+                kept.append(candidates[cand_idx])
+
         return kept
     except Exception:
         return []
@@ -421,6 +392,80 @@ def _tokenize_for_coverage(text: str) -> set[str]:
     tokens = re.findall(r"[a-z]+", text)
     return {t for t in tokens if len(t) >= 3 and t not in _STOPWORDS}
 
+
+
+_TOKEN_RE = re.compile(r"[a-zA-Z]{3,}")
+
+def _tokens(text: str) -> set[str]:
+    tokens = _TOKEN_RE.findall((text or "").lower())
+    return {t for t in tokens if t not in _STOPWORDS}
+
+def deterministic_filter_relevant_chunks(
+    question: str,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Deterministic, domain-agnostic relevance filter.
+    Uses lexical overlap + coverage ratio, then sorts by:
+    (lexical_overlap, coverage_ratio, vector_score).
+    """
+
+    print("DBG deterministic_filter: input =", len(candidates))
+
+    q_tokens = _tokens(question)
+    if not q_tokens:
+        return []
+
+    scored: list[dict[str, Any]] = []
+
+    for c in candidates:
+        content = c.get("content") or ""
+        c_tokens = _tokens(content)
+        if not c_tokens:
+            continue
+
+        overlap_tokens = q_tokens & c_tokens
+        overlap = len(overlap_tokens)
+        coverage = overlap / max(1, len(q_tokens))
+
+        # Hard gates (tight but generic)
+        if overlap < 2:
+            continue
+        if coverage < 0.15:
+            continue
+
+        # Vector score: smaller distance = better
+        vec_score = c.get("score")
+        if vec_score is None:
+            vec_score = 999.0
+
+        scored.append({
+            **c,
+            "_lexical_overlap": overlap,
+            "_coverage_ratio": coverage,
+            "_vector_score": vec_score,
+        })
+
+    if not scored:
+        print("DBG deterministic_filter: output = 0")
+        return []
+
+    scored.sort(
+        key=lambda x: (
+            x["_lexical_overlap"],
+            x["_coverage_ratio"],
+            -1.0 * x["_vector_score"],  # invert so better (smaller) distances rank higher
+        ),
+        reverse=True,
+    )
+
+    # Target window: ~3–8
+    result = scored[:8]
+
+    print("DBG deterministic_filter: output =", len(result))
+    return result
+
+
 def _passes_coverage_gate(question: str, candidates: list[dict[str, Any]]) -> bool:
     """
     Coverage gate: return True only if at least one chunk has enough lexical overlap
@@ -445,5 +490,22 @@ def _passes_coverage_gate(question: str, candidates: list[dict[str, Any]]) -> bo
     return best_overlap >= 0.20
 
 
+def _tokens(s: str) -> set[str]:
+    words = re.findall(r"[a-zA-Z]{3,}", (s or "").lower())
+    return {w for w in words if w not in _STOPWORDS}
 
+def deterministic_filter_relevant_chunks(question: str, candidates: list[dict]) -> list[dict]:
+    print("DBG deterministic_filter: input =", len(candidates))
+    q = _tokens(question)
+    if not q:
+        return []
+    kept: list[dict] = []
+    for c in candidates:
+        t = _tokens(c.get("content") or "")
+        overlap = len(q & t)
+        if overlap >= 2:   
+            kept.append(c)
+
+    print("DBG deterministic_filter: output =", len(kept))
+    return kept
     
