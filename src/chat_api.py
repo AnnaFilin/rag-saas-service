@@ -303,17 +303,6 @@ def chat(request: ChatRequest):
     )
 
     # 5) Answering (this is separate from the LLM filter toggle)
-    # if stored_records == 0:
-    #     answer = "I do not know based on the provided context."
-    # elif not LLM_ENABLED:
-    #     answer = "LLM is temporarily disabled."
-    # else:
-    #     context = "\n\n---\n\n".join(
-    #         c["content"] for c in candidates
-    #         if c.get("content")
-    #     )
-    #     chain = build_llm_chain(effective_role)
-    #     answer = get_llm_answer(chain, request.question, context)
     if stored_records == 0:
         answer = "I do not know based on the provided context."
     elif not LLM_ENABLED:
@@ -335,6 +324,7 @@ def chat(request: ChatRequest):
         print("DBG role_used =", "request.role" if role_for_answer != STRICT_ANSWER_ROLE else "STRICT_ANSWER_ROLE")
         chain = build_llm_chain(role_for_answer)
         answer = get_llm_answer(chain, request.question, context)
+
 
         # Hard normalization: forbid mixed "answered + I do not know"
         lower = (answer or "").strip().lower()
