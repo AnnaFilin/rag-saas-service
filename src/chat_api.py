@@ -446,3 +446,29 @@ def list_documents(workspace_id: str):
         }
     finally:
         db.close()
+
+
+@app.delete("/workspaces/{workspace_id}")
+def delete_workspace(workspace_id: str):
+    db: Session = SessionLocal()
+    try:
+        ws_id = (workspace_id or "").strip()
+        if not ws_id:
+            raise HTTPException(status_code=400, detail="workspace_id is required")
+
+        ws = db.query(Workspace).filter(Workspace.id == ws_id).first()
+        if not ws:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+
+        deleted_notes = (
+            db.query(Note)
+            .filter(Note.workspace_id == ws_id)
+            .delete(synchronize_session=False)
+        )
+
+        db.delete(ws)  # cascades: documents -> chunks
+        db.commit()
+
+        return {"ok": True, "workspace_id": ws_id, "deleted": {"notes": deleted_notes}}
+    finally:
+        db.close()
