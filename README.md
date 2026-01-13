@@ -1,194 +1,81 @@
-# RAG SaaS Backend (FastAPI + Neon + pgvector)
+# RAG SaaS Backend
 
-Small but real RAG backend split into two Cloud Run services: one for ingestion, one for chat.  
-It uses Neon Postgres with `pgvector` for embeddings storage and SentenceTransformers for vectorization.
+A backend service implementing Retrieval-Augmented Generation (RAG) with strict source grounding and workspace-isolated document retrieval.
 
-This project is meant as a learning playground and a portfolio-ready example of a simple RAG backend.
+Designed as a small but production-oriented RAG system suitable for portfolio demonstration and internal knowledge tools.
+
+---
+
+## What It Does
+
+- Ingests documents into a vector database
+- Retrieves relevant text chunks per query
+- Generates answers grounded strictly in retrieved context
+- Returns answers together with exact source excerpts
+
+If relevant information is not found, the system explicitly returns a no-answer response.
 
 ---
 
 ## Architecture
 
-**Storage**
+The system consists of two independent FastAPI services:
 
-- Neon Postgres with `pgvector`
-- Embedding dimension: `VECTOR(768)`
+### Ingestion Service
+- Accepts document uploads per workspace
+- Splits documents into chunks
+- Generates embeddings using SentenceTransformers
+- Stores data in PostgreSQL with pgvector
 
-**Schema**
+### Ingestion options
+- **Cloud ingest service**: for typical documents (API upload → chunking → embeddings → storage).
+- **Local helper**: for large/heavy documents that are impractical to upload via Cloud Run; it runs locally and writes processed chunks + embeddings to the same Postgres/pgvector storage.
 
-- Workspace
-  - id: text
-- Document
-  - id: serial
-  - workspace_id: text (FK → Workspace.id)
-  - source: text (file path or name)
-- Chunk
-  - id: serial
-  - document_id: int (FK → Document.id)
-  - index: int (chunk index inside the document)
-  - content: text
-  - embedding: vector(768)
-
-**Services (Cloud Run)**
-
-1. ingest (rag-saas-ingest)
-   - FastAPI app: src.ingest_api:app
-   - Endpoints:
-     - GET /health – healthcheck
-     - POST /ingest-file – upload file, split into chunks, create embeddings, write to Neon
-   - Responsibilities:
-     - Accept file for a given workspace_id
-     - Convert PDF/MD to markdown (MarkItDown)
-     - Split text into chunks
-     - Create embeddings with SentenceTransformer
-     - Persist Workspace, Document, Chunk + embeddings in Neon
-
-2. chat (rag-saas-rag)
-   - FastAPI app: src.chat_api:app
-   - Endpoints:
-     - GET /health – healthcheck
-     - POST /chat – answer question using RAG pipeline
-   - Responsibilities:
-     - Encode question into embedding
-     - Retrieve top-k chunks with pgvector (l2_distance)
-     - Build context from retrieved chunks
-     - Call LLM (Ollama or OpenAI)
-     - Return answer + sources
-
-**LLM pipeline**
-
-- Embeddings: SentenceTransformer (mpnet model, 768-dim vectors)
-- LLM backends:
-  - ollama (local)
-  - openai (via OpenAI API)
-- Configured via environment variables:
-  - LLM_BACKEND (default: ollama)
-  - LLM_MODEL (e.g. llama3.2:latest or gpt-4.1-mini)
-  - OPENAI_API_KEY (for LLM_BACKEND=openai)
-  - LLM_ENABLED=true|false (for disabling LLM in chat service)
+### Chat Service
+- Retrieves relevant chunks using vector similarity
+- Builds context from retrieved sources
+- Generates answers using an LLM
+- Returns answers with source references
 
 ---
 
-## Local development
+## Tech Stack
 
-### 1. Environment
+**Backend**
+- Python
+- FastAPI
+- PostgreSQL (Neon) + pgvector
+- SentenceTransformers
+- SQLAlchemy
 
-Create .env.local in the project root with something like:
+**LLM**
+- Ollama (local)
+- OpenAI (cloud, optional)
+- Configurable via environment variables
 
-    DATABASE_URL=postgresql+psycopg://user:password@host:port/dbname
-    LLM_BACKEND=openai
-    LLM_MODEL=gpt-4.1-mini
-    OPENAI_API_KEY=sk-...
-    LLM_ENABLED=true
+**Frontend**
+- Vue 3
+- Tailwind CSS
+- Vite
 
-Make sure your Postgres has pgvector installed and the DATABASE_URL points to it  
-(you can use Neon or any local Postgres with pgvector).
-
-### 2. Install dependencies
-
-    python -m venv .venv
-    source .venv/bin/activate  # on Windows: .venv\Scripts\activate
-    pip install -r requirements.txt
-
-### 3. Run ingestion API locally
-
-    uvicorn src.ingest_api:app --reload --port 8001
-
-Check:
-
-    curl http://localhost:8001/health
-
-### 4. Run chat API locally
-
-    uvicorn src.chat_api:app --reload --port 8000
-
-Check:
-
-    curl http://localhost:8000/health
-
-### 5. Ingest a document (local)
-
-    curl -X POST "http://localhost:8001/ingest-file" \
-      -F "workspace_id=test-local" \
-      -F "file=@./some-doc.pdf"
-
-### 6. Ask a question (local)
-
-    curl -X POST "http://localhost:8000/chat" \
-      -H "Content-Type: application/json" \
-      -d '{
-        "workspace_id": "test-local",
-        "question": "What is this document about?",
-        "role": "You are a helpful assistant for this RAG backend."
-      }'
+The frontend is a minimal admin UI for document upload and chat testing.
 
 ---
 
-## Cloud Run deployment (Neon + OpenAI)
+## Deployment
 
-The project is designed to run as two separate Cloud Run services:
+The services are designed to be deployed independently (e.g. Cloud Run):
 
-- rag-saas-ingest – heavy path (file upload, embeddings, writes to Neon)
-- rag-saas-rag – light path (chat + retrieval + LLM)
+- `rag-saas-ingest` — document ingestion and embeddings
+- `rag-saas-rag` — retrieval and answering
 
-Below is an example deployment pattern (simplified, adjust for your project).
-
-### Ingestion service
-
-    gcloud run deploy rag-saas-ingest \
-      --source . \
-      --region me-west1 \
-      --set-env-vars "DATABASE_URL=postgresql+psycopg://...Neon-URL..." \
-      --set-env-vars "LLM_ENABLED=false" \
-      --set-env-vars "LLM_BACKEND=ollama" \
-      --set-env-vars "LLM_MODEL=llama3.2:latest" \
-      --command "uvicorn" \
-      --args "src.ingest_api:app","--host","0.0.0.0","--port","8080"
-
-### Chat service (OpenAI)
-
-    gcloud run deploy rag-saas-rag \
-      --source . \
-      --region me-west1 \
-      --set-env-vars "DATABASE_URL=postgresql+psycopg://...Neon-URL..." \
-      --set-env-vars "LLM_ENABLED=true" \
-      --set-env-vars "LLM_BACKEND=openai" \
-      --set-env-vars "LLM_MODEL=gpt-4.1-mini" \
-      --set-env-vars "OPENAI_API_KEY=sk-..." \
-      --command "uvicorn" \
-      --args "src.chat_api:app","--host","0.0.0.0","--port","8080"
-
-After deployment, you should be able to call:
-
-    curl -X POST "https://<rag-saas-ingest-URL>/ingest-file" \
-      -F "workspace_id=test-cloud" \
-      -F "file=@./some-doc.pdf"
-
-    curl -X POST "https://<rag-saas-rag-URL>/chat" \
-      -H "Content-Type: application/json" \
-      -d '{
-        "workspace_id": "test-cloud",
-        "question": "What is this service supposed to do?",
-        "role": "You are a helpful assistant for a small RAG backend."
-      }'
+Local and cloud deployments share the same architecture.
 
 ---
 
-## Minimal web UI (admin panel)
+## Project Status
 
-The repo includes a tiny static admin page:
+Stable prototype.
 
-- index.html – simple two-column layout
-- styles.css – basic styling
-- main.js – JS logic
+Core RAG functionality, retrieval pipeline, and source attribution are implemented and working.
 
-Current behaviour:
-
-- Left form: uploads files to the ingestion service (/ingest-file)
-- Right form: sends chat requests to the chat service (/chat)
-- All URLs are controlled via constants at the top of main.js:
-  - INGEST_URL
-  - CHAT_URL
-
-This UI is intentionally simple and “technical” – it’s just an internal admin panel for testing the backend.  
-A proper frontend (Vite + Vue/React) can be built on top of this backend in a separate project.
